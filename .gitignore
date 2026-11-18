@@ -20,3 +20,7 @@ Thumbs.db
 
 # Local vector database storage
 .rag_storage/
+
+# Virtual environments
+.venv/
+venv/

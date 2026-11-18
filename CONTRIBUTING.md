@@ -7,7 +7,7 @@ Thank you for your interest in improving Anki Leech Doctor! We welcome contribut
 ## 🛠️ Local Development Setup
 
 ### 1. Prerequisites
-- Python 3.10+
+- Python 3.12+ (CI tests 3.12, 3.13, 3.14 and 3.15)
 - [Anki](https://apps.ankiweb.net/) desktop app running with the [AnkiConnect](https://ankiweb.net/shared/info/2055492153) add-on (code: `2055492153`).
 - A Gemini API Key from [Google AI Studio](https://aistudio.google.com/).
 
