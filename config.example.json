@@ -1,0 +1,14 @@
+{
+  "apiKey": "YOUR_GEMINI_API_KEY_HERE",
+  "model": "gemini-flash-latest",
+  "jlptLevel": "N3",
+  "kanjiDeckName": "",
+  "kanjiStrategy": "hybrid",
+  "mnemonicStyle": "playful",
+  "targetMiningDeck": "Mining",
+  "grammarDeckBase": "Mining::Grammar",
+  "miningNoteType": "Japanese sentences",
+  "reviewScopeQuery": "",
+  "leechSearchQuery": "tag:leech is:suspended",
+  "persona": "Describe yourself and your interests, e.g. 'Nurse and amateur baker who loves cats and absurd humor.'"
+}

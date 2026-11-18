@@ -1,0 +1,22 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+
+# Local configuration & sensitive API keys
+config.json
+.env
+*.env.local
+
+# Operating System
+.DS_Store
+Thumbs.db
+
+# IDE & editors
+.vscode/
+.idea/
+*.swp
+
+# Local vector database storage
+.rag_storage/

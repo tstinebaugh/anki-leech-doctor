@@ -1,0 +1,6 @@
+target-version = "py310"
+line-length = 140
+
+[lint]
+# Real bugs only (undefined names, unused imports/variables, syntax errors).
+select = ["E9", "F"]

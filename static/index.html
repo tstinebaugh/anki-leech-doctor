@@ -1,0 +1,829 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Anki Leech Doctor & Mnemonic Studio</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Noto+Sans+JP:wght@400;500;700&family=Outfit:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+  <link rel="alternate icon" type="image/x-icon" href="/static/favicon.ico">
+  <link rel="apple-touch-icon" href="/static/favicon.svg">
+  <link rel="stylesheet" href="/static/style.css?v=20261118_v1">
+  <!-- Pinned with integrity hashes: a changed or compromised file won't run -->
+  <script src="https://cdn.jsdelivr.net/npm/marked@18.1.3/lib/marked.umd.js" integrity="sha384-tp/syYhgK+FeVVrz2SPmgKX5atVZ8P8hReAvOPUn58M265VNy1IbdmZAY7Jmd0gF" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.4.17/dist/purify.min.js" integrity="sha384-P0JNneQf81HOl9VwNXK76cQ9VMD6Nfsnepxb0cCOg8+UzEdzgPHAPV4wVQrvYQSx" crossorigin="anonymous"></script>
+</head>
+<body>
+  <div class="app-container">
+    <!-- TOP NAVBAR -->
+    <header class="top-nav" id="top-nav">
+      <!-- TOP NAV PRIMARY BAR (Always visible in single clean row) -->
+      <div class="top-nav-bar">
+        <div class="logo">
+          <span class="logo-icon">⚡</span>
+          <span class="logo-text">Leech<strong>Doctor</strong></span>
+        </div>
+
+        <div class="progress-pill">
+          <button id="btn-prev-card" class="btn-nav" title="Previous Card (Left Arrow)">◀</button>
+          <span id="card-counter" class="counter-text">Card 0 of 0</span>
+          <button id="btn-next-card" class="btn-nav" title="Next Card (Right Arrow)">▶</button>
+        </div>
+
+        <button id="btn-mobile-menu-toggle" class="btn-mobile-menu-toggle" aria-label="Toggle Mobile Menu" title="Menu">
+          <span class="hamburger-icon" id="hamburger-icon">☰</span>
+        </button>
+      </div>
+
+      <!-- NAV CONTROLS (Desktop: Inline row on right. Mobile: Clean slide-down drawer) -->
+      <div class="top-nav-menu" id="top-nav-menu">
+        <div class="menu-item-group deck-group">
+          <label for="deck-select" class="nav-control-label">Deck</label>
+          <div class="deck-selector-wrap">
+            <select id="deck-select" class="select-dropdown deck-select-dropdown">
+              <option value="">Loading Decks...</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="menu-item-group filter-group">
+          <label for="filter-status-select" class="nav-control-label">Filter</label>
+          <div class="filter-selector-wrap" title="Filter cards by status and leech tags">
+            <select id="filter-status-select" class="select-dropdown filter-status-dropdown">
+              <option value="suspended_leech">🔴 Suspended + Leech (0)</option>
+              <option value="suspended">⏸️ Suspended (0)</option>
+              <option value="active">⚡ Leech Tagged (Active) (0)</option>
+              <option value="all">🏷️ All Leech Tagged (0)</option>
+              <option value="not_reviewed">⏳ Not Reviewed by AI (0)</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="menu-item-group search-group">
+          <label for="vocab-search-input" class="nav-control-label">Search</label>
+          <div class="nav-search-wrap" id="nav-search-wrap" title="Search vocab (Click to search)">
+            <span class="search-icon">🔍</span>
+            <input type="text" id="vocab-search-input" class="search-input" placeholder="Search vocab..." autocomplete="off">
+            <button id="btn-clear-search" class="btn-clear-search hidden" title="Clear Search">✕</button>
+          </div>
+        </div>
+
+        <div class="menu-item-group actions-group">
+          <button id="btn-open-mine-modal" class="btn-mine-nav" title="Mine New Vocab Word (Shortcut: N or M)">
+            <span class="mine-icon">⛏️</span> <span class="mine-nav-text">+ Mine New Word</span>
+          </button>
+          <button id="btn-open-settings" class="btn-settings-nav" title="Settings & System Health">
+            <span class="settings-icon">⚙️</span>
+            <span class="settings-nav-text">Settings</span>
+            <span id="global-status-dot" class="global-status-dot status-dot-good" title="All Systems Operational"></span>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <!-- MOBILE VIEW TABS (Mobile only: Study & AI | Kanji & Radar | Notes) -->
+    <div class="mobile-view-tabs" id="mobile-view-tabs">
+      <button type="button" class="mobile-view-tab active" data-view="study">
+        <span class="tab-icon">📇</span> Study &amp; AI
+      </button>
+      <button type="button" class="mobile-view-tab" data-view="kanji">
+        <span class="tab-icon">🔍</span> Kanji &amp; Radar
+      </button>
+      <button type="button" class="mobile-view-tab" data-view="notes">
+        <span class="tab-icon">📝</span> Notes
+      </button>
+    </div>
+
+    <!-- MAIN WORKSPACE -->
+    <main class="workspace">
+      <!-- WORKSPACE LEFT WRAPPER (Becomes 2 columns on 4K/ultra-wide screens via display: contents) -->
+      <div class="workspace-left-wrapper">
+        <!-- COLUMN 1: TARGET VOCABULARY & CONTEXT SENTENCE -->
+        <section class="panel panel-card">
+          <!-- Target Vocabulary Card -->
+          <div class="glass-card vocab-hero-card">
+            <div class="card-meta-row">
+              <span id="deck-badge" class="badge badge-subtle">Deck Name</span>
+              <span id="status-badge" class="badge badge-danger">Suspended Leech</span>
+            </div>
+
+            <div class="vocab-main-display">
+              <div class="vocab-top-bar">
+                <div class="vocab-furigana-row" id="vocab-furigana-display"></div>
+                <button id="btn-toggle-vocab-edit" class="btn-tiny btn-edit-vocab-trigger" title="Edit Vocabulary Meaning / Definition">✏️ Edit Vocab</button>
+              </div>
+              <h1 class="vocab-kanji" id="vocab-kanji-display">選択中...</h1>
+              <div class="vocab-def" id="vocab-def-display">Select a card to begin</div>
+            </div>
+
+            <!-- Inline Vocab / Meaning Editor (Hidden by default) -->
+            <div id="vocab-editor" class="vocab-editor hidden">
+              <div class="vocab-editor-grid">
+                <div class="form-group">
+                  <label for="edit-vocab-kanji">Vocab Expression (Kanji):</label>
+                  <input type="text" id="edit-vocab-kanji" class="input-text">
+                </div>
+                <div class="form-group">
+                  <label for="edit-vocab-furigana">Vocab Reading (bracket format):</label>
+                  <input type="text" id="edit-vocab-furigana" class="input-text">
+                </div>
+              </div>
+              <div class="form-group">
+                <label for="edit-vocab-def">Meaning / Definition:</label>
+                <textarea id="edit-vocab-def" class="input-textarea" rows="2" placeholder="Enter meaning or English definition..."></textarea>
+              </div>
+              <div class="editor-buttons">
+                <button id="btn-save-inline-vocab" class="btn-primary-sm">Save Vocab to Anki</button>
+                <button id="btn-cancel-inline-vocab" class="btn-ghost-sm">Cancel</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Sentence Block with Furigana Ruby -->
+          <div class="glass-card sentence-box">
+            <div class="sentence-header">
+              <span class="section-title">Context Sentence</span>
+              <button id="btn-toggle-sentence-edit" class="btn-tiny" title="Edit Sentence Fields">✏️ Edit</button>
+            </div>
+            <div class="sentence-japanese" id="sentence-ruby-display">
+              <!-- Ruby elements rendered here -->
+            </div>
+            <div class="sentence-english" id="sentence-eng-display"></div>
+
+            <!-- Inline Sentence Editor (Hidden by default) -->
+            <div id="sentence-editor" class="sentence-editor hidden">
+              <label>SentKanji (with &lt;b&gt;):</label>
+              <input type="text" id="edit-sent-kanji" class="input-text">
+              <label>SentFurigana (bracket format):</label>
+              <input type="text" id="edit-sent-furigana" class="input-text">
+              <label>SentEng (translation):</label>
+              <input type="text" id="edit-sent-eng" class="input-text">
+              <div class="editor-buttons">
+                <button id="btn-save-inline-sentence" class="btn-primary-sm">Save Sentence to Anki</button>
+                <button id="btn-cancel-inline-sentence" class="btn-ghost-sm">Cancel</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- COLUMN 2 (On 4K) / LOWER LEFT (On Laptop): MEMORY NETWORK & NOTES -->
+        <section class="panel panel-memory">
+          <!-- Multi-Vector Collision & Confusion Radar -->
+          <div id="deck-collision-radar" class="collision-radar-box hidden">
+            <div class="radar-header" id="radar-header" title="Click to collapse / expand collision radar">
+              <div class="radar-title-wrap">
+                <button type="button" class="btn-collapse-toggle" id="btn-toggle-radar-collapse" aria-label="Toggle Radar Collapse" title="Collapse / Expand Radar">
+                  <span class="collapse-chevron" id="radar-collapse-chevron">▼</span>
+                </button>
+                <span class="radar-icon">⚡</span>
+                <span class="radar-title">Deck Collision & Confusion Radar</span>
+              </div>
+              <span id="collision-count-badge" class="badge badge-warning">0 Collisions</span>
+            </div>
+            <div id="radar-cards-list" class="radar-cards-list">
+              <!-- Rendered dynamically -->
+            </div>
+          </div>
+
+          <!-- Existing Notes Preview & Editor -->
+          <div class="glass-card existing-notes-box">
+            <div class="notes-header">
+              <span class="section-title">Current Anki Notes</span>
+              <div class="notes-header-actions">
+                <button id="btn-toggle-notes-edit" class="btn-tiny" title="Edit Anki Notes (Shortcut: E)">✏️ Edit Notes</button>
+              </div>
+            </div>
+            <div class="notes-content" id="card-notes-preview">No notes on this card yet.</div>
+
+            <!-- Inline Notes Editor (Hidden by default) -->
+            <div id="notes-editor" class="notes-editor hidden">
+              <!-- Mode Toggle: WYSIWYG vs HTML -->
+              <div class="notes-editor-top-bar">
+                <div class="editor-mode-toggle" id="notes-mode-toggle">
+                  <button type="button" class="btn-mode-pill active" id="btn-mode-wysiwyg" title="Visual Rich Text Editor (no HTML brackets needed)">👁️ Visual (WYSIWYG)</button>
+                  <button type="button" class="btn-mode-pill" id="btn-mode-html" title="Raw HTML Code Editor">💻 HTML Code</button>
+                </div>
+              </div>
+
+              <!-- WYSIWYG Rich Text Formatting Toolbar -->
+              <div id="notes-wysiwyg-toolbar" class="wysiwyg-toolbar">
+                <button type="button" class="toolbar-btn" data-cmd="formatBlock" data-arg="h3" title="Heading 3 (Section Header)"><b>H3</b></button>
+                <button type="button" class="toolbar-btn" data-cmd="bold" title="Bold"><b>B</b></button>
+                <button type="button" class="toolbar-btn" data-cmd="italic" title="Italic"><i>I</i></button>
+                <button type="button" class="toolbar-btn" data-cmd="underline" title="Underline"><u>U</u></button>
+                <span class="toolbar-divider"></span>
+                <button type="button" class="toolbar-btn" data-cmd="insertUnorderedList" title="Bullet List">• List</button>
+                <button type="button" class="toolbar-btn" data-cmd="insertHorizontalRule" title="Horizontal Divider Line">― Divider</button>
+                <span class="toolbar-divider"></span>
+                <button type="button" class="toolbar-btn" data-cmd="removeFormat" title="Clear Formatting">✕ Clear Format</button>
+              </div>
+
+              <!-- Visual Contenteditable Editor -->
+              <div id="notes-wysiwyg-editor" class="wysiwyg-content-area" contenteditable="true" spellcheck="false"></div>
+
+              <!-- Raw HTML Textarea (Shown only in HTML mode) -->
+              <textarea id="edit-card-notes" class="input-textarea notes-raw-textarea hidden" rows="7" placeholder="Enter HTML notes..."></textarea>
+
+              <div class="editor-buttons">
+                <button id="btn-save-inline-notes" class="btn-primary-sm">Save Notes to Anki</button>
+                <button id="btn-cancel-inline-notes" class="btn-ghost-sm">Cancel</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Constituent Kanji & RTK Stories -->
+          <div class="kanji-stories-section" id="kanji-stories-section">
+            <div class="section-header" id="kanji-section-header" title="Click to collapse / expand kanji breakdown">
+              <div class="kanji-title-wrap">
+                <button type="button" class="btn-collapse-toggle" id="btn-toggle-kanji-collapse" aria-label="Toggle Kanji Collapse" title="Collapse / Expand Kanji">
+                  <span class="collapse-chevron" id="kanji-collapse-chevron">▼</span>
+                </button>
+                <h2>Constituent Kanji & Stories</h2>
+              </div>
+              <span class="badge badge-info" id="kanji-count-badge">0 Kanji</span>
+            </div>
+            <div id="kanji-cards-container" class="kanji-cards-grid">
+              <!-- Rendered dynamically -->
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <!-- RIGHT PANEL: AI MNEMONIC STUDIO, PERSONALIZED SENTENCES & CHAT COPILOT -->
+      <section class="panel panel-ai">
+        <!-- AI Navigation Tabs -->
+        <div class="ai-tabs">
+          <button class="ai-tab active" data-tab="tab-mnemonic">✨ Mnemonic Studio</button>
+          <button class="ai-tab" data-tab="tab-sentence">🏍️ Persona Sentences</button>
+          <button class="ai-tab" data-tab="tab-chat">💬 Sensei Study Chat</button>
+        </div>
+
+        <!-- TAB 1: MNEMONIC STUDIO -->
+        <div id="tab-mnemonic" class="tab-content active">
+          <div class="ai-studio-card glass-card">
+            <div class="studio-header">
+              <div>
+                <h3>Kanji Mnemonic Synthesizer</h3>
+                <p class="subtitle">Blends constituent kanji radicals, keywords, and phonetic reading links into memory anchors.</p>
+              </div>
+              <button id="btn-gen-mnemonic" class="btn-sparkle">
+                <span class="sparkle-icon">✨</span> Generate Mnemonic
+              </button>
+            </div>
+
+            <!-- Mnemonic Style Selector -->
+            <div class="mnemonic-style-bar">
+              <span class="style-bar-label">Mnemonic Mode:</span>
+              <div class="style-button-group" id="mnemonic-style-group">
+                <button type="button" class="btn-style-pill active" data-style="playful" title="Witty, absurd humor, pop culture & phonetic reading puns">🤪 Playful</button>
+                <button type="button" class="btn-style-pill" data-style="historical" title="Authentic kanji history, ancient pictographic roots, and radical etymology">🏛️ Historical / Etymology</button>
+                <button type="button" class="btn-style-pill" data-style="cinematic" title="High-stakes, sensory-rich dramatic scenes">🎬 Cinematic</button>
+                <button type="button" class="btn-style-pill" data-style="minimalist" title="Ultra-condensed, rapid-association flashcard links">🧘 Minimalist</button>
+              </div>
+            </div>
+
+            <div class="custom-instruction-wrap">
+              <input type="text" id="mnemonic-custom-instruction" class="input-text" placeholder="Optional custom hint (e.g., make it extra absurd, or focus on on'yomi)...">
+            </div>
+
+            <div class="output-container" id="mnemonic-output-container">
+              <div class="empty-state">
+                <div class="empty-icon">🧠</div>
+                <p>Click <strong>"Generate Mnemonic"</strong> to create a memorable mnemonic synthesis for this vocabulary word.</p>
+              </div>
+            </div>
+
+            <!-- Mnemonic Inline Editor (hidden by default) -->
+            <div id="mnemonic-editor-wrap" class="mnemonic-editor-wrap hidden">
+              <textarea id="edit-mnemonic-textarea" class="input-textarea" rows="8" placeholder="Edit mnemonic text..."></textarea>
+            </div>
+
+            <div class="action-footer-studio" id="mnemonic-actions" style="display: none;">
+              <button id="btn-save-mnemonic-anki" class="btn-success">
+                💾 Save Mnemonic to Anki Notes
+              </button>
+              <button id="btn-edit-mnemonic" class="btn-ghost">
+                ✏️ Edit Before Saving
+              </button>
+              <button id="btn-cancel-edit-mnemonic" class="btn-ghost hidden">
+                Cancel Edit
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- TAB 2: PERSONALIZED SENTENCE GENERATOR -->
+        <div id="tab-sentence" class="tab-content">
+          <div class="ai-studio-card glass-card">
+            <div class="studio-header">
+              <div>
+                <h3>Persona Example Sentences</h3>
+                <p class="subtitle">Select one or multiple personas. The AI will evaluate this vocabulary word and pick the most natural, memorable thematic match.</p>
+              </div>
+              <button id="btn-gen-sentence" class="btn-sparkle">
+                <span class="sparkle-icon">🏍️</span> Generate Sentence
+              </button>
+            </div>
+
+            <!-- Multi-Select Persona Pool -->
+            <div class="persona-pool-section" id="persona-pool-section">
+              <div class="persona-pool-header" id="persona-pool-header" title="Click to collapse / expand persona pool">
+                <div class="persona-pool-title-wrap">
+                  <button type="button" class="btn-collapse-toggle" id="btn-toggle-persona-pool" aria-label="Toggle Persona Pool" title="Collapse / Expand">
+                    <span class="collapse-chevron" id="persona-collapse-chevron">▼</span>
+                  </button>
+                  <span class="section-title">Active Persona Pool</span>
+                  <span id="persona-collapsed-summary" class="persona-collapsed-summary hidden"></span>
+                </div>
+                <div class="persona-pool-actions" id="persona-pool-actions">
+                  <button id="btn-select-all-personas" class="btn-tiny">Select All</button>
+                  <button id="btn-reset-personas" class="btn-tiny">Reset</button>
+                </div>
+              </div>
+
+              <div class="persona-pool-body" id="persona-pool-body">
+                <div class="topic-chips" id="persona-chips-container">
+                  <button class="topic-chip active" data-topic="Software Engineering, Debugging & Tech Life">💻 Software Engineering</button>
+                  <button class="topic-chip active" data-topic="Motorcycle Riding, Track Days & Garage Mechanics">🏍️ Motorcycle & Racing</button>
+                  <button class="topic-chip active" data-topic="Witty & Absurd Tokyo Comedy">⚡ Absurd Tokyo Comedy</button>
+                  <button class="topic-chip active" data-topic="Dark Sci-Fi & Cyberpunk Dystopia">🚀 Dark Sci-Fi</button>
+                  <button class="topic-chip" data-topic="Gaming, RPGs & Anime Tropes">🎮 Gaming & RPGs</button>
+                  <button class="topic-chip" data-topic="Fitness, Weightlifting & Gym Life">🏋️ Fitness & Gym</button>
+                  <button class="topic-chip" data-topic="Tokyo Street Food, Izakayas & Nightlife">🍜 Izakaya & Food</button>
+                </div>
+
+                <!-- Add custom persona tag inline -->
+                <div class="add-persona-row">
+                  <input type="text" id="new-persona-input" class="input-text-sm" placeholder="Add custom persona tag (e.g. 🎸 Guitar, ✈️ Kyoto Travel)...">
+                  <button id="btn-add-persona" class="btn-secondary-sm">+ Add</button>
+                </div>
+
+                <div class="persona-pool-status" id="persona-pool-status">
+                  <span class="status-count-dot"></span> <span id="active-persona-count">4</span> personas active — AI will pick the best story for this card.
+                </div>
+              </div>
+            </div>
+
+            <div class="custom-instruction-wrap">
+              <input type="text" id="sentence-custom-topic" class="input-text" placeholder="Optional specific scene/scenario (e.g., track day crash, code review fight)...">
+            </div>
+
+            <div class="output-container" id="sentence-output-container">
+              <div class="empty-state">
+                <div class="empty-icon">📝</div>
+                <p>Click <strong>"Generate Sentence"</strong> to let the AI pick the best persona from your active pool for <strong>this word</strong>.</p>
+              </div>
+            </div>
+
+            <div class="action-footer-studio" id="sentence-actions" style="display: none;">
+              <button id="btn-apply-sentence-anki" class="btn-success">
+                💾 Replace Anki Example Sentence
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- TAB 3: SENSEI STUDY CHAT -->
+        <div id="tab-chat" class="tab-content">
+          <div class="chat-studio-card glass-card">
+            <div class="chat-header">
+              <div>
+                <h3>Interactive Sensei Tutor</h3>
+                <p class="subtitle">Diagnose why you keep confusing this card, or ask if it's essential for your target level.</p>
+              </div>
+              <button id="btn-clear-chat" class="btn-tiny" title="Clear chat history for this card">Clear</button>
+            </div>
+
+            <div class="quick-questions">
+              <button class="quick-q" data-q="Why do I keep failing this card? What are the common confusion traps for this word?">🔍 Why do I confuse this?</button>
+              <button class="quick-q" id="quick-q-essential" data-q="Is this word actually critical for my target JLPT level and everyday conversational Japanese, or is it an outdated edge case?">📊 Is it worth keeping?</button>
+              <button class="quick-q" data-q="How does this word differ from its closest synonyms in nuance and natural usage?">⚖️ Nuance vs Synonyms</button>
+            </div>
+
+            <div class="chat-messages" id="chat-messages-container">
+              <div class="chat-bubble chat-sensei">
+                <div class="bubble-author">Sensei AI</div>
+                <div class="bubble-text">Konnichiwa! I am ready to review this card with you. Tell me what is making this card slip from memory, or ask any question!</div>
+              </div>
+            </div>
+
+            <form id="chat-form" class="chat-input-row">
+              <input type="text" id="chat-input" class="input-text chat-text-input" placeholder="Ask about nuances, confusion, JLPT frequency..." autocomplete="off">
+              <button type="submit" class="btn-send" id="btn-send-chat">Send</button>
+            </form>
+          </div>
+        </div>
+      </section>
+    </main>
+    <div id="cards-loading-indicator" class="cards-loading-indicator hidden" role="status" aria-live="polite">
+      <span class="cards-loading-spinner" aria-hidden="true"></span>
+      <span class="cards-loading-label">Loading cards…</span>
+    </div>
+
+    <!-- BOTTOM ACTION FOOTER -->
+    <footer class="bottom-bar">
+      <div class="hotkey-hints">
+        <span class="hotkey-item"><kbd>←</kbd> / <kbd>→</kbd> Navigate</span>
+        <span class="hotkey-item"><kbd>Space</kbd> Generate Mnemonic</span>
+        <span class="hotkey-item"><kbd>E</kbd> Edit Notes</span>
+        <span class="hotkey-item"><kbd>N</kbd> Mine New Word</span>
+        <span class="hotkey-item"><kbd>A</kbd> Add Card</span>
+        <span class="hotkey-item"><kbd>U</kbd> Unsuspend</span>
+        <span class="hotkey-item"><kbd>D</kbd> Delete</span>
+        <span class="hotkey-item" id="hotkey-undo-legend"><kbd>Z</kbd> Undo</span>
+        <span class="hotkey-item"><kbd>S</kbd> Save Notes</span>
+      </div>
+
+      <div class="action-buttons">
+        <button id="btn-footer-undo" class="btn-action btn-undo hidden" title="Undo unsuspend of last card and re-suspend in Anki (Shortcut: Z)">
+          ↺ Undo Unsuspend
+        </button>
+        <button id="btn-footer-delete-card" class="btn-action btn-danger-action" title="Permanently delete this card from Anki (Shortcut: D)">
+          🗑️ Delete Card
+        </button>
+        <button id="btn-footer-delete-duplicate" class="btn-action btn-danger-action hidden" title="Exact match detected - Delete duplicate card from Anki">
+          🗑️ Delete Duplicate Card
+        </button>
+        <button id="btn-footer-add-mined" class="btn-action btn-add-mined hidden" title="Add this mined card to Anki (Shortcut: A)">
+          <span class="btn-icon-text">➕</span> <span id="btn-add-mined-label">Add to Mining Deck</span>
+        </button>
+        <button id="btn-footer-cancel-draft" class="btn-action btn-cancel-draft hidden" title="Discard Draft">
+          ✕ Discard Draft
+        </button>
+        <button id="btn-footer-unsuspend" class="btn-action btn-unsuspend" title="Unsuspend card and remove leech tag">
+          🟢 Unsuspend & Unleech
+        </button>
+        <button id="btn-footer-skip" class="btn-action btn-skip" title="Keep suspended and go to next">
+          ⏭️ Skip Card
+        </button>
+      </div>
+    </footer>
+  </div>
+
+  <!-- MINE NEW VOCAB MODAL -->
+  <div id="mining-modal" class="modal-overlay hidden">
+    <div class="modal-card modal-card-mining glass-card">
+      <div class="modal-header">
+        <div class="modal-title-wrap">
+          <div class="mining-header-icon">⛏️</div>
+          <div>
+            <h2 id="mining-modal-title">Mine New Vocabulary Word</h2>
+            <p class="subtitle">Target Deck: <strong id="mining-modal-target-deck">My Mining Deck</strong></p>
+          </div>
+        </div>
+        <button id="btn-close-mining" class="btn-icon">✕</button>
+      </div>
+      <form id="mining-form" class="modal-body">
+        <div class="mining-type-row">
+          <div class="mining-type-toggle" role="radiogroup" aria-label="Card type">
+            <button type="button" class="btn-mining-type active" data-card-type="vocab" role="radio" aria-checked="true">📗 Vocab</button>
+            <button type="button" class="btn-mining-type" data-card-type="grammar" role="radio" aria-checked="false">📘 Grammar</button>
+          </div>
+          <select id="mining-grammar-level" class="select-dropdown mining-grammar-level hidden" aria-label="Grammar JLPT level">
+            <option value="auto" selected>Auto (AI picks)</option>
+            <option value="N5">N5</option>
+            <option value="N4">N4</option>
+            <option value="N3">N3</option>
+            <option value="N2">N2</option>
+            <option value="N1">N1</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label for="mining-input-vocab" id="mining-input-vocab-label">Japanese Word or Phrase <span class="required-star">*</span></label>
+          <input type="text" id="mining-input-vocab" class="input-text input-large-japanese" placeholder="e.g. 限界, 見失う, 一目惚れ, バイク..." autocomplete="off" required>
+          <small class="form-help" id="mining-input-vocab-help">Enter in kanji, kana, or dictionary form.</small>
+        </div>
+
+        <div class="form-group">
+          <label for="mining-input-hint">Optional Context / Meaning Hint / Sentence</label>
+          <textarea id="mining-input-hint" class="input-textarea" rows="2" placeholder="e.g., specific nuance, scene from anime/manga, or sentence you encountered..."></textarea>
+          <small class="form-help" id="mining-input-hint-help">The AI will automatically look up furigana, English definition, constituent kanji stories, and pitch accent.</small>
+        </div>
+
+        <div class="modal-footer modal-footer-mining">
+          <button type="button" id="btn-cancel-mining" class="btn-ghost">Cancel</button>
+          <button type="submit" id="btn-submit-mining" class="btn-primary btn-sparkle-primary">
+            <span class="sparkle-icon">⚡</span> Lookup & Prepare Card
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- SETTINGS MODAL -->
+  <div id="settings-modal" class="modal-overlay hidden">
+    <div class="modal-card modal-card-settings glass-card">
+      <div class="modal-header">
+        <div class="modal-title-wrap">
+          <div class="settings-header-icon">⚙️</div>
+          <div>
+            <h2>Settings & Preferences</h2>
+            <p class="subtitle">Configure AI model, target decks, JLPT level, and mnemonic styling</p>
+          </div>
+        </div>
+        <button id="btn-close-settings" class="btn-icon">✕</button>
+      </div>
+      <div class="modal-body settings-scroll-body">
+        
+        <!-- SECTION 0: SYSTEM HEALTH & INTEGRATIONS -->
+        <div class="settings-section settings-status-section">
+          <div class="status-dashboard-card">
+            <div class="status-dashboard-header">
+              <div class="status-dash-title-wrap">
+                <span id="settings-summary-dot" class="global-status-dot status-dot-good"></span>
+                <span class="status-dash-title">System Status & Integrations</span>
+              </div>
+              <span id="settings-summary-badge" class="badge badge-success">All Healthy</span>
+            </div>
+            <div class="status-dashboard-grid">
+              <div class="status-grid-item" id="status-card-anki">
+                <div class="status-item-header">
+                  <span class="status-item-dot" id="dot-anki"></span>
+                  <span class="status-item-name">AnkiConnect</span>
+                </div>
+                <span class="status-item-detail" id="detail-anki">Connected (Port 8765)</span>
+              </div>
+              <div class="status-grid-item" id="status-card-gemini">
+                <div class="status-item-header">
+                  <span class="status-item-dot" id="dot-gemini"></span>
+                  <span class="status-item-name">Gemini AI</span>
+                </div>
+                <span class="status-item-detail" id="detail-gemini">Ready (gemini-flash-latest)</span>
+              </div>
+              <div class="status-grid-item" id="status-card-rag">
+                <div class="status-item-header">
+                  <span class="status-item-dot" id="dot-rag"></span>
+                  <span class="status-item-name">RAG Index</span>
+                </div>
+                <span class="status-item-detail" id="detail-rag">Active (3,985 cards)</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- SECTION 1: AI & CREDENTIALS -->
+        <div class="settings-section">
+          <h3 class="settings-section-title">🔑 AI Credentials & Model</h3>
+          <div class="form-group">
+            <label for="setting-api-key">Gemini API Key</label>
+            <input type="password" id="setting-api-key" class="input-text" placeholder="AIzaSy...">
+            <small class="form-help">Get a free key from <a href="https://aistudio.google.com/" target="_blank" rel="noopener" style="color: #a78bfa; text-decoration: underline;">Google AI Studio</a>. Saved locally in <code>config.json</code>.</small>
+          </div>
+
+          <div class="form-group">
+            <label for="setting-model">Gemini Model</label>
+            <select id="setting-model" class="select-dropdown">
+              <option value="gemini-flash-latest">Gemini Flash Latest</option>
+              <option value="gemini-flash-lite-latest">Gemini Flash Lite (Fast & Separate Quota)</option>
+              <option value="gemini-3-flash-preview">Gemini 3 Flash Preview</option>
+              <option value="gemini-3.7-flash">Gemini 3.7 Flash (Recommended - Smartest)</option>
+              <option value="gemini-3.6-flash">Gemini 3.6 Flash (Fast & Modern)</option>
+              <option value="gemini-3.5-flash">Gemini 3.5 Flash</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- SECTION 2: JLPT LEVEL & PERSONA -->
+        <div class="settings-section">
+          <h3 class="settings-section-title">🎯 Learning Level & Persona</h3>
+          <div class="form-group">
+            <label for="setting-jlpt-level">Target JLPT Level</label>
+            <select id="setting-jlpt-level" class="select-dropdown">
+              <option value="N5">JLPT N5 (Beginner)</option>
+              <option value="N4">JLPT N4 (Upper Beginner)</option>
+              <option value="N3">JLPT N3 (Intermediate)</option>
+              <option value="N2">JLPT N2 (Upper Intermediate)</option>
+              <option value="N1">JLPT N1 (Advanced)</option>
+              <option value="General">General Everyday Japanese</option>
+            </select>
+            <small class="form-help">Calibrates AI sentence grammar complexity, vocabulary difficulty, and Sensei advice.</small>
+          </div>
+
+          <div class="form-group">
+            <label for="setting-persona">User Persona & Background Interests</label>
+            <textarea id="setting-persona" class="input-textarea" rows="3" placeholder="e.g. Nurse and amateur baker who loves cats and absurd, witty humor..."></textarea>
+            <small class="form-help">Used to generate memorable, tailored stories and scenarios.</small>
+          </div>
+        </div>
+
+        <!-- SECTION 3: KANJI / RTK EXTRACTION -->
+        <div class="settings-section">
+          <h3 class="settings-section-title">🀄 Kanji Stories & RTK Strategy</h3>
+          <div class="form-group">
+            <label for="setting-kanji-strategy">Kanji Retrieval Strategy</label>
+            <select id="setting-kanji-strategy" class="select-dropdown">
+              <option value="hybrid">Hybrid (Pull from Anki deck if found, AI fallback)</option>
+              <option value="ai_only">✨ AI Decomposition Only (No Kanji deck needed)</option>
+            </select>
+            <small class="form-help">Select "AI Decomposition Only" if you do not have an RTK deck installed.</small>
+          </div>
+
+          <div class="form-group" id="setting-kanji-deck-wrap">
+            <label for="setting-kanji-deck">Kanji Source Deck</label>
+            <select id="setting-kanji-deck" class="select-dropdown">
+              <option value="">(Any deck named *Kanji*)</option>
+            </select>
+            <small class="form-help">Deck containing your kanji cards with stories, keywords, or Heisig notes.</small>
+          </div>
+        </div>
+
+        <!-- SECTION 4: MNEMONIC STYLING -->
+        <div class="settings-section">
+          <h3 class="settings-section-title">✨ Mnemonic Style & Tone</h3>
+          <div class="form-group">
+            <label for="setting-mnemonic-style">Default Mnemonic Style</label>
+            <select id="setting-mnemonic-style" class="select-dropdown">
+              <option value="playful">🤪 Playful & Absurd (Witty humor, pop culture, phonetic puns)</option>
+              <option value="historical">🏛️ Historical & Etymological (Ancient pictographs & radical origins)</option>
+              <option value="cinematic">🎬 Cinematic (High-intensity sensory scenes)</option>
+              <option value="minimalist">🧘 Minimalist (Ultra-condensed rapid links)</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label for="setting-tone">Custom Mnemonic Tone / Prompt Guidelines</label>
+            <input type="text" id="setting-tone" class="input-text" value="Absurd, vivid, funny, and memorable with clear phonetic reading puns">
+          </div>
+        </div>
+
+        <!-- SECTION 5: DECK TARGETS -->
+        <div class="settings-section">
+          <h3 class="settings-section-title">📦 Anki Deck Targets</h3>
+          <div class="form-group">
+            <label for="setting-mining-deck">Target Mining Deck Name</label>
+            <input type="text" id="setting-mining-deck" class="input-text" placeholder="Mining">
+            <small class="form-help">Destination deck when mining new vocabulary cards (will be created if missing).</small>
+          </div>
+
+          <div class="form-group">
+            <label for="setting-grammar-deck">Grammar Deck Base</label>
+            <input type="text" id="setting-grammar-deck" class="input-text" placeholder="Mining::Grammar">
+            <small class="form-help">Mined grammar goes into a subdeck per level: <code>&lt;base&gt;::N4</code>, <code>&lt;base&gt;::N3</code>, ...</small>
+          </div>
+
+          <div class="form-group">
+            <label for="setting-note-type">Mining Note Type</label>
+            <input type="text" id="setting-note-type" class="input-text" placeholder="Japanese sentences">
+            <small class="form-help">Anki note type for mined cards. Fields are matched by name (VocabKanji/Expression/Word/Front, ...). See the README for custom field mapping.</small>
+          </div>
+
+          <div class="form-group">
+            <label for="setting-review-scope">"All Review Cards" Scope</label>
+            <input type="text" id="setting-review-scope" class="input-text" placeholder='Whole collection (e.g. deck:"Core 2k*")'>
+            <small class="form-help">Anki search that limits "All Review Cards" and the totals. Leave empty to use your whole collection.</small>
+          </div>
+
+          <div class="form-group">
+            <label for="setting-leech-query">Suspended Leech Search Query</label>
+            <input type="text" id="setting-leech-query" class="input-text" placeholder="tag:leech is:suspended">
+            <small class="form-help">Anki search for the "Suspended leeches" filter when no deck is selected.</small>
+          </div>
+        </div>
+
+        <!-- SECTION 6: LOCAL MULTI-VECTOR RAG INDEX -->
+        <div class="settings-section">
+          <h3 class="settings-section-title">🧠 Local Multi-Vector RAG Index</h3>
+          <div class="rag-settings-card">
+            <div class="rag-stat-grid">
+              <div class="rag-stat-item">
+                <span class="rag-stat-val" id="rag-stat-count">0</span>
+                <span class="rag-stat-lbl">Cards Indexed</span>
+              </div>
+              <div class="rag-stat-item">
+                <span class="rag-stat-val" id="rag-stat-sync">Never</span>
+                <span class="rag-stat-lbl">Last Synchronized</span>
+              </div>
+              <div class="rag-stat-item">
+                <span class="rag-stat-val">3 (Sem/Vis/Phon)</span>
+                <span class="rag-stat-lbl">Vector Spaces</span>
+              </div>
+            </div>
+
+            <!-- Deck Sources Multi-Select / Checklist -->
+            <div class="form-group" style="margin-top: 1rem; margin-bottom: 0.75rem;">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.4rem;">
+                <label style="font-weight: 600; font-size: 0.85rem; color: var(--text-primary); margin: 0;">
+                  📚 Decks to Include in RAG Search
+                </label>
+                <div style="display: flex; gap: 0.35rem;">
+                  <button type="button" id="btn-rag-select-active" class="btn-tiny">Active Decks (N5-N3 + Mining)</button>
+                  <button type="button" id="btn-rag-select-all" class="btn-tiny">All</button>
+                  <button type="button" id="btn-rag-select-none" class="btn-tiny">Clear</button>
+                </div>
+              </div>
+              <div id="rag-deck-checklist" class="rag-deck-checklist-container">
+                <div style="color: var(--text-subtle); font-size: 0.8rem; padding: 0.5rem;">Loading Anki decks...</div>
+              </div>
+              <small class="form-help">Only cards from checked decks will be indexed. Suspended cards in your checked decks are included so you can contrast previous trouble words.</small>
+            </div>
+
+            <div class="rag-sync-action-row">
+              <button type="button" id="btn-sync-rag-index" class="btn-primary-sm btn-sparkle-sm">
+                🔄 Sync & Reindex Selected Decks
+              </button>
+              <span id="rag-sync-feedback" class="rag-sync-feedback"></span>
+            </div>
+            <small class="form-help">Indexes definitions, visual kanji radical topology, and kana readings for instant collision detection and contrastive mnemonics.</small>
+          </div>
+        </div>
+
+      </div>
+      <div class="modal-footer">
+        <button id="btn-save-settings" class="btn-primary">Save Settings</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- DELETE CARD CONFIRMATION MODAL -->
+  <div id="delete-confirm-modal" class="modal-overlay hidden">
+    <div class="modal-card modal-card-delete glass-card">
+      <div class="modal-header">
+        <div class="modal-title-wrap">
+          <div class="delete-header-icon">⚠️</div>
+          <div>
+            <h2>Delete Card from Anki?</h2>
+            <p class="subtitle">Permanently delete duplicate card from your collection</p>
+          </div>
+        </div>
+        <button id="btn-close-delete-confirm" class="btn-icon" aria-label="Close">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="delete-warning-text">
+          Are you sure you want to permanently delete this card from your Anki collection? <strong>This action cannot be undone.</strong>
+        </div>
+
+        <div class="delete-card-preview-box">
+          <div class="delete-preview-header">
+            <span class="delete-preview-kanji" id="delete-confirm-vocab-kanji">単語</span>
+            <span class="delete-preview-furigana" id="delete-confirm-vocab-furigana">たんご</span>
+          </div>
+          <div class="delete-preview-def" id="delete-confirm-vocab-def">Vocabulary definition</div>
+          <div class="delete-preview-meta">
+            <span class="delete-preview-deck" id="delete-confirm-deck-name">Deck Name</span>
+            <span class="delete-preview-id" id="delete-confirm-card-id">ID: #0</span>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer delete-modal-footer">
+        <button id="btn-cancel-delete" class="btn-ghost">Cancel</button>
+        <button id="btn-confirm-delete" class="btn-danger-primary">
+          <span class="btn-icon-text">🗑️</span> Yes, Permanently Delete
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- UNSUSPEND CONFIRMATION MODAL -->
+  <div id="unsuspend-confirm-modal" class="modal-overlay hidden">
+    <div class="modal-card modal-card-unsuspend glass-card">
+      <div class="modal-header">
+        <div class="modal-title-wrap">
+          <div class="warning-header-icon">⚠️</div>
+          <div>
+            <h2 id="unsuspend-confirm-title">Are you sure you want to unsuspend & unleech this card?</h2>
+            <p class="subtitle">Review memory anchors before unleeching</p>
+          </div>
+        </div>
+        <button id="btn-close-unsuspend-confirm" class="btn-icon" aria-label="Close">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="unsuspend-warning-intro">
+          You haven't changed both the <strong>mnemonic</strong> and <strong>example sentence</strong> for <strong id="unsuspend-confirm-vocab-kanji">this word</strong>. Updating memory anchors helps prevent it from becoming a leech again!
+        </div>
+
+        <div class="unsuspend-checklist-card">
+          <div class="checklist-item" id="unsuspend-check-mnemonic">
+            <span class="checklist-status-icon" id="unsuspend-icon-mnemonic">⚠️</span>
+            <div class="checklist-info">
+              <span class="checklist-label">Mnemonic Notes</span>
+              <span class="checklist-subtext" id="unsuspend-status-mnemonic">Not updated yet</span>
+            </div>
+          </div>
+          <div class="checklist-item" id="unsuspend-check-sentence">
+            <span class="checklist-status-icon" id="unsuspend-icon-sentence">⚠️</span>
+            <div class="checklist-info">
+              <span class="checklist-label">Example Sentence</span>
+              <span class="checklist-subtext" id="unsuspend-status-sentence">Not updated yet</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer unsuspend-modal-footer">
+        <button id="btn-cancel-unsuspend-modal" class="btn-ghost">Cancel & Keep Editing</button>
+        <button id="btn-confirm-override-unsuspend" class="btn-action btn-unsuspend-override" title="Override check and unsuspend card">
+          ⚠️ Yes, Unsuspend Anyway
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- TOAST NOTIFICATION CONTAINER -->
+  <div id="toast-container" class="toast-container"></div>
+
+  <script src="/static/app.js?v=20261118_v1"></script>
+</body>
+</html>
+

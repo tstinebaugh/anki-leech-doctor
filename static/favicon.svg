@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs>
+    <!-- Background Gradient -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0f172a" />
+      <stop offset="50%" stop-color="#1e1b4b" />
+      <stop offset="100%" stop-color="#090d16" />
+    </linearGradient>
+
+    <!-- Electric Lightning Gradient -->
+    <linearGradient id="boltGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fef08a" />
+      <stop offset="40%" stop-color="#f59e0b" />
+      <stop offset="100%" stop-color="#ea580c" />
+    </linearGradient>
+
+    <!-- Cross / Pill Cyan Glow -->
+    <linearGradient id="cyanGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8" />
+      <stop offset="100%" stop-color="#6366f1" />
+    </linearGradient>
+
+    <!-- Border Glow Gradient -->
+    <linearGradient id="borderGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.8" />
+      <stop offset="50%" stop-color="#818cf8" stop-opacity="0.4" />
+      <stop offset="100%" stop-color="#f59e0b" stop-opacity="0.8" />
+    </linearGradient>
+
+    <!-- Glow Filter -->
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="1.5" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+  </defs>
+
+  <!-- App Icon Background Squircle -->
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="url(#bgGrad)" stroke="url(#borderGrad)" stroke-width="2" />
+
+  <!-- Doctor Medical Cross (Subtle Background Pill Accent) -->
+  <g opacity="0.35" filter="url(#glow)">
+    <rect x="26" y="14" width="12" height="36" rx="4" fill="url(#cyanGrad)" />
+    <rect x="14" y="26" width="36" height="12" rx="4" fill="url(#cyanGrad)" />
+  </g>
+
+  <!-- Electric Lightning Bolt (Leech Doctor's Defibrillator / Shock to cure leeches) -->
+  <!-- Outer Glow for Lightning -->
+  <path d="M36 6 L18 34 L31 34 L26 58 L48 26 L34 26 Z" 
+        fill="#f59e0b" 
+        opacity="0.5" 
+        filter="url(#glow)" />
+
+  <!-- Sharp Main Lightning Bolt -->
+  <path d="M36 7 L19 33 L31 33 L26 57 L46 27 L34 27 Z" 
+        fill="url(#boltGrad)" 
+        stroke="#ffffff" 
+        stroke-width="1.2" 
+        stroke-linejoin="round" />
+
+  <!-- Mini Sparkles / Sparks around the bolt -->
+  <circle cx="16" cy="18" r="2" fill="#38bdf8" filter="url(#glow)" />
+  <circle cx="48" cy="46" r="2" fill="#fef08a" filter="url(#glow)" />
+  <circle cx="46" cy="16" r="1.5" fill="#f43f5e" />
+  <polygon points="17,46 19,42 21,46 19,50" fill="#38bdf8" />
+</svg>

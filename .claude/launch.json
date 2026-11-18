@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "anki-leech-doctor",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "uvicorn", "app:app", "--host", "127.0.0.1", "--port", "8766"],
+      "port": 8766
+    }
+  ]
+}
