@@ -109,7 +109,7 @@ flowchart TD
         GeminiClient["gemini_client.py (AI Engine)"]
         
         subgraph RAGEngine["🧠 Local Multi-Vector RAG"]
-            RAG["rag_engine.py (ChromaDB)"]
+            RAG["rag_engine.py + vector_store.py (numpy)"]
             IDSEngine["kanji_data.py (Level 3 IDS Parser)"]
             IDSDataset[("kanji_ids_data.json<br/>27,584 CJK Trees")]
             SimilarDataset[("kanji_similar.json<br/>2,902 Look-Alikes")]
@@ -138,6 +138,8 @@ flowchart TD
     App <--> UI
     UI <--> CollisionRadar
 ```
+
+Design decisions, with measurements, are recorded in [`docs/design/`](docs/design/). For example, [0001: Replace ChromaDB with a plain numpy vector index](docs/design/0001-numpy-vector-index.md).
 
 ---
 

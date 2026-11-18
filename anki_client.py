@@ -321,6 +321,8 @@ class AnkiClient:
 
             deck_names = filtered_decks if filtered_decks else all_decks
 
+        # Uses notesInfo (fields only) instead of cardsInfo, whose reply is ~90% rendered
+        # question/answer HTML and CSS: ~10x less data and memory for a full sync.
         all_parsed_cards = []
         seen_card_ids = set()
 
@@ -329,37 +331,40 @@ class AnkiClient:
                 base_query = f'deck:"{d}"'
                 if exclude_suspended:
                     base_query += " -is:suspended"
-
-                card_ids = self.invoke("findCards", query=base_query)
+                card_ids = (self.invoke("findCards", query=base_query) or [])[:limit]
+                card_ids = [cid for cid in card_ids if cid not in seen_card_ids]
                 if not card_ids:
                     continue
-                chunk_size = 500
-                for i in range(0, min(len(card_ids), limit), chunk_size):
-                    cards_info = self.invoke("cardsInfo", cards=card_ids[i:i + chunk_size])
-                    for c in cards_info:
-                        cid = c["cardId"]
-                        # Strict deck matching: reject cards from other decks/subdecks
-                        if c.get("deckName", "") not in deck_names and d not in deck_names:
-                            continue
-                        if cid in seen_card_ids:
-                            continue
-                        seen_card_ids.add(cid)
-                        fields = {k: v["value"] for k, v in c["fields"].items()}
+                wanted = set(card_ids)
+
+                deck_of = {cid: deck for deck, cids in (self.invoke("getDecks", cards=card_ids) or {}).items() for cid in cids}
+                suspended_of = dict(zip(card_ids, self.invoke("areSuspended", cards=card_ids) or []))
+                note_ids = self.invoke("findNotes", query=base_query) or []
+
+                for i in range(0, len(note_ids), 500):
+                    for note in self.invoke("notesInfo", notes=note_ids[i:i + 500]) or []:
+                        fields = {k: v["value"] for k, v in (note.get("fields") or {}).items()}
                         vocab_kanji = pick_field(fields, "vocabKanji").strip()
                         if not vocab_kanji:
                             continue
-                        all_parsed_cards.append({
-                            "cardId": cid,
-                            "noteId": c["note"],
-                            "deckName": c["deckName"],
+                        record = {
+                            "noteId": note["noteId"],
                             "vocabKanji": vocab_kanji,
                             "vocabFurigana": pick_field(fields, "vocabFurigana"),
                             "vocabDef": pick_field(fields, "vocabDef"),
                             "sentKanji": pick_field(fields, "sentKanji"),
                             "sentEng": pick_field(fields, "sentEng"),
-                            "suspended": c.get("queue") == -1,
-                            "lapses": c.get("lapses", 0),
-                        })
+                        }
+                        for cid in note.get("cards") or []:
+                            if cid not in wanted or cid in seen_card_ids:
+                                continue
+                            seen_card_ids.add(cid)
+                            all_parsed_cards.append({
+                                "cardId": cid,
+                                **record,
+                                "deckName": deck_of.get(cid, d),
+                                "suspended": bool(suspended_of.get(cid, False)),
+                            })
             except Exception as e:
                 logger.warning(f"Error fetching cards for deck {d}: {e}")
 

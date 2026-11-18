@@ -3,6 +3,7 @@ Kanji radical decomposition, visual similarity metrics, and phonetic feature ext
 Includes Level 3 Unicode Ideographic Description Sequences (IDS) Spatial Tree Engine.
 """
 
+import hashlib
 import os
 import json
 import re
@@ -54,6 +55,15 @@ IDS_OPERATORS: Dict[str, int] = {
 # Stand-ins for components Unicode has no character for. They say nothing about
 # what two kanji share, so they never count as a common component.
 IDS_PLACEHOLDERS = set("#？") | {chr(cp) for cp in range(0x2460, 0x2474)}  # ①-⑳
+
+def stable_bucket(token: str, dim: int) -> int:
+    """Maps a string to a vector slot, the same way in every process.
+
+    (Python's built-in hash() is randomised per process, which made saved vectors
+    disagree with query vectors after every restart.)
+    """
+    return int.from_bytes(hashlib.blake2b(token.encode("utf-8"), digest_size=8).digest(), "big") % dim
+
 
 class IDSTree:
     """Represents a hierarchical syntax tree of a Kanji's spatial composition."""
@@ -380,7 +390,7 @@ def generate_visual_vector(text: str, dim: int = 64) -> List[float]:
                 vec[RADICAL_TO_INDEX[comp]] += 1.0
             else:
                 # Hash unmapped component
-                h = abs(hash(comp)) % dim
+                h = stable_bucket(comp, dim)
                 vec[h] += 0.5
         # Add unicode codepoint feature
         cp_idx = (ord(k) - 0x4E00) % dim
@@ -512,12 +522,12 @@ def generate_phonetic_vector(reading: str, dim: int = 64) -> List[float]:
     # 1. Encode phonemes with positional weighting
     for pos, ph in enumerate(phonemes):
         pos_weight = 1.0 / (1.0 + 0.2 * pos)
-        h = abs(hash(ph)) % dim
+        h = stable_bucket(ph, dim)
         vec[h] += 1.0 * pos_weight
         # Bigram encoding
         if pos + 1 < len(phonemes):
             bigram = f"{ph}_{phonemes[pos+1]}"
-            bh = abs(hash(bigram)) % dim
+            bh = stable_bucket(bigram, dim)
             vec[bh] += 1.5 * pos_weight
 
     # 2. Length feature

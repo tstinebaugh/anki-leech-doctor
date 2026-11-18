@@ -30,7 +30,7 @@ app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
 
 anki = AnkiClient()
 gemini = GeminiClient()
-rag = MultiVectorRAG(api_key=gemini.api_key)
+rag = MultiVectorRAG()
 
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 os.makedirs(STATIC_DIR, exist_ok=True)
@@ -677,7 +677,6 @@ async def update_config(req: ConfigUpdateRequest):
     updates = {}
     if getattr(req, "apiKey", None) is not None and req.apiKey.strip():
         updates["apiKey"] = req.apiKey.strip()
-        rag.set_api_key(req.apiKey.strip())
     if getattr(req, "model", None) is not None:
         updates["model"] = req.model
     if getattr(req, "persona", None) is not None:
