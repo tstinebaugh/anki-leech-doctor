@@ -112,7 +112,8 @@ followed by Hugging Face tooling. For comparison, the rest of the app (FastAPI, 
 httpx, pydantic, numpy) is 17 packages and 51 MB.
 
 `onnxruntime` also sets the pace for Python support. Its current release requires
-Python 3.11+ and has no wheels for Python 3.15 yet, so ChromaDB currently blocks 3.15.
+Python 3.11+ and had no wheels for Python 3.15, so ChromaDB blocked 3.15. With it gone,
+the project now requires Python 3.12+ and CI tests 3.12 through 3.15.
 
 ## Decision
 

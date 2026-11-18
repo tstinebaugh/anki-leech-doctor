@@ -1,3 +1,11 @@
+import sys
+
+if sys.version_info < (3, 12):
+    sys.exit(
+        f"Anki Leech Doctor needs Python 3.12 or newer (this is Python {sys.version.split()[0]}). "
+        "See the Quickstart in README.md."
+    )
+
 import asyncio
 import logging
 import os

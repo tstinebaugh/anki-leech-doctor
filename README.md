@@ -1,7 +1,7 @@
 # ⚡ Anki Leech Doctor & Mnemonic Studio
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-009688.svg)](https://fastapi.tiangolo.com)
 [![Google Gemini API](https://img.shields.io/badge/Gemini%20API-Flash-8E75B2.svg)](https://ai.google.dev/)
 [![JLPT Support](https://img.shields.io/badge/JLPT-N5%20%7C%20N4%20%7C%20N3%20%7C%20N2%20%7C%20N1-E11D48.svg)](https://www.jlpt.jp/e/)
@@ -182,14 +182,14 @@ Roles without a matching field are skipped. The note type must have a field for 
 
 ### Prerequisites
 1. **Anki Desktop**: Running locally with the [AnkiConnect](https://ankiweb.net/shared/info/2055492153) add-on installed (Code: `2055492153`). No AnkiConnect CORS changes are needed: only the local server talks to Anki.
-2. **Python 3.10+**.
+2. **Python 3.12 or newer** (tested on 3.12–3.15). Use the latest patch release of your version, since that's where security fixes land.
 3. **Gemini API Key**: Get a free API key from [Google AI Studio](https://aistudio.google.com/app/apikey). The free tier has low daily limits per model; when the configured model is out of quota the app falls back to other Flash models automatically.
 
 ### 1. Clone & Install
 ```bash
 git clone https://github.com/tstinebaugh/anki-leech-doctor.git
 cd anki-leech-doctor
-python3 -m venv .venv
+python3 -m venv .venv      # python3 must be 3.12+, e.g. python3.14 -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
