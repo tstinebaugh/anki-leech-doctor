@@ -451,7 +451,7 @@ async def test_gemini_fallback_and_error_transparency():
         resp_429.text = '{"error": {"code": 429, "message": "Quota exceeded"}}'
         resp_429.json.return_value = {"error": {"code": 429, "message": "Quota exceeded"}}
 
-        # 2nd call (gemini-flash-lite-latest): 200 OK
+        # 2nd call (first fallback, gemini-3-flash-preview): 200 OK
         resp_200 = MagicMock()
         resp_200.status_code = 200
         resp_200.json.return_value = {
@@ -469,7 +469,7 @@ async def test_gemini_fallback_and_error_transparency():
         first_url = mock_post.call_args_list[0][0][0]
         second_url = mock_post.call_args_list[1][0][0]
         assert "gemini-flash-latest" in first_url
-        assert "gemini-flash-lite-latest" in second_url
+        assert "gemini-3-flash-preview" in second_url
         # The key travels in a header, never in the URL
         assert "fake-api-key" not in first_url
         assert mock_post.call_args_list[0].kwargs["headers"]["x-goog-api-key"] == "fake-api-key"

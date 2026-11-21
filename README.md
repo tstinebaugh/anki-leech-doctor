@@ -238,6 +238,7 @@ All settings are stored locally in `config.json` (git-ignored). Only the keys yo
 | :--- | :--- | :--- |
 | `apiKey` | `string` | Google Gemini API key. Falls back to the `GEMINI_API_KEY` / `GOOGLE_API_KEY` environment variables. |
 | `model` | `string` | Gemini model ID. `gemini-flash-latest` always points at Google's current Flash model. |
+| `thinkingLevel` | `string` | The most a Gemini 3+ model may think before answering: `low`, `medium` (default) or `high`. Short requests take about the same time at any level. |
 | `jlptLevel` | `string` | Target level calibration (`N5`, `N4`, `N3`, `N2`, `N1`, `General`). |
 | `kanjiDeckName` | `string` | Deck with your kanji stories (RTK, NihongoShark, ...). Empty = search any deck named `*Kanji*`. |
 | `kanjiStrategy` | `string` | `hybrid` (deck stories, AI decomposition when missing) or `ai_only` (no kanji deck needed). |
@@ -269,6 +270,7 @@ All settings are stored locally in `config.json` (git-ignored). Only the keys yo
 - **"Could not connect to AnkiConnect"**: Anki must be open with AnkiConnect installed. Restart Anki after installing the add-on.
 - **"Note type … was not found in Anki"** when adding a mined card: set **Mining Note Type** in Settings to a note type you have, or install the *Ankidrone Essentials* deck for `Japanese sentences`.
 - **"All Review Cards" is empty or shows the wrong cards**: check **"All Review Cards" Scope** in Settings. Leave it empty to use your whole collection.
+- **Slow or timed-out Gemini calls, or "high demand" (HTTP 503)**: Google's popular Flash models are often overloaded. The app waits at most 25s per model, then falls back to `gemini-3-flash-preview` and `gemini-flash-lite-latest`, and skips a model that just failed for 1 to 10 minutes. If it keeps happening, choose `gemini-3-flash-preview` as the model in Settings.
 - **Gemini errors mentioning quota (HTTP 429)**: the free tier's daily limit is used up. Wait for the reset, or pick another model in Settings.
 - **"Invalid host header"**: you opened the app under a host name that isn't allowed. Use `http://127.0.0.1:8766` or set `LEECH_DOCTOR_ALLOWED_HOSTS`.
 

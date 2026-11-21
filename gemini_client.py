@@ -1,6 +1,7 @@
 import os
 import json
 import re
+import time
 import logging
 import httpx
 from typing import Any, Dict, List, Optional, Tuple
@@ -10,6 +11,107 @@ logger = logging.getLogger(__name__)
 from config_defaults import CONFIG_PATH as DEFAULT_CONFIG_PATH, DEFAULT_CONFIG
 
 GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
+
+# ---- Gemini call reliability -----------------------------------------------------------
+# Popular Gemini models are often overloaded: Google can hold a request for 15-60s and
+# then answer 503. Each attempt therefore gets a short timeout, a call has a total time
+# budget, and a model that just failed is skipped for a while (see ModelHealth).
+
+# Tried in this order after the configured model. The preview and lite models were the
+# ones still answering in 1-3s while the stable Flash models were overloaded.
+FALLBACK_MODELS = ["gemini-3-flash-preview", "gemini-flash-lite-latest", "gemini-flash-latest"]
+ATTEMPT_TIMEOUT = 25.0     # seconds to wait for one model; healthy replies take 1-10s
+CONNECT_TIMEOUT = 10.0
+TOTAL_TIME_BUDGET = 60.0   # seconds for one call across all models
+COOLDOWN_BASE = 60.0       # first failure; doubles on each consecutive failure
+COOLDOWN_MAX = 600.0
+COOLDOWN_NOT_FOUND = 3600.0
+
+
+class ModelHealth:
+    """Remembers which models recently failed so later calls try healthy ones first."""
+
+    def __init__(self) -> None:
+        self._until: Dict[str, float] = {}
+        self._strikes: Dict[str, int] = {}
+        self.no_thinking: set = set()  # models that rejected our thinkingConfig
+
+    def cooldown_left(self, model: str) -> float:
+        return max(0.0, self._until.get(model, 0.0) - time.monotonic())
+
+    def failed(self, model: str, retry_after: Optional[float] = None, not_found: bool = False) -> None:
+        strikes = self._strikes.get(model, 0) + 1
+        self._strikes[model] = strikes
+        if not_found:
+            seconds = COOLDOWN_NOT_FOUND
+        elif retry_after:
+            seconds = min(max(retry_after, 5.0), COOLDOWN_MAX)
+        else:
+            seconds = min(COOLDOWN_BASE * 2 ** (strikes - 1), COOLDOWN_MAX)
+        self._until[model] = time.monotonic() + seconds
+
+    def succeeded(self, model: str) -> None:
+        self._until.pop(model, None)
+        self._strikes.pop(model, None)
+
+    def order(self, models: List[str]) -> List[str]:
+        """Healthy models first in their given order, then cooling ones, soonest-recovering first."""
+        seen: List[str] = []
+        for m in models:
+            if m not in seen:
+                seen.append(m)
+        healthy = [m for m in seen if not self.cooldown_left(m)]
+        cooling = sorted((m for m in seen if self.cooldown_left(m)), key=self.cooldown_left)
+        return healthy + cooling
+
+    def reset(self) -> None:
+        self.__init__()
+
+
+model_health = ModelHealth()
+
+
+def thinking_config_for(model: str, level: str) -> Optional[Dict[str, Any]]:
+    """Gemini 3+ takes a thinkingLevel cap; 2.5 takes a token budget (0 turns it off on Flash)."""
+    name = model.lower()
+    if "gemma" in name:
+        return None
+    if "2.5" in name or "2-5" in name:
+        return None if "pro" in name else {"thinkingBudget": 0}
+    return {"thinkingLevel": level}
+
+
+def _extract_text(data: Dict[str, Any]) -> Tuple[str, str]:
+    """Returns (text, problem); text is empty when the reply had no usable answer."""
+    candidates = data.get("candidates", [])
+    if not candidates:
+        reason = (data.get("promptFeedback") or {}).get("blockReason")
+        return "", f"No candidates returned in response{f' (blocked: {reason})' if reason else ''}"
+    parts = candidates[0].get("content", {}).get("parts", [])
+    text = "".join(p.get("text", "") for p in parts if p.get("text") and not p.get("thought"))
+    if text.strip():
+        return text, ""
+    if candidates[0].get("finishReason") == "MAX_TOKENS":
+        return "", "Reply was cut off: thinking used up the output token limit"
+    return "", "Empty text parts returned"
+
+
+def _parse_error(resp: httpx.Response) -> Tuple[str, Optional[float]]:
+    """Error message and, for rate limits, the retry delay Google suggests (in seconds)."""
+    try:
+        err = resp.json().get("error", {})
+    except Exception:
+        return resp.text, None
+    retry_after = None
+    for detail in err.get("details", []) or []:
+        delay = str(detail.get("retryDelay", ""))
+        if delay.endswith("s"):
+            try:
+                retry_after = float(delay[:-1])
+            except ValueError:
+                pass
+    return err.get("message", resp.text), retry_after
+
 
 KANJI_CHARS = r"\u4e00-\u9faf々〆ヶ"
 PRE_KANJI_REGEX = re.compile(rf"([^ \t\n><{KANJI_CHARS}])([{KANJI_CHARS}]+\[[^\]]+\])")
@@ -248,64 +350,77 @@ class GeminiClient:
         if not self.api_key:
             raise ValueError("Gemini API key is not configured. Please set your API key in the UI settings or config.json.")
 
-        models_to_try = [self.model]
-        for fallback in ["gemini-flash-lite-latest", "gemini-3-flash-preview", "gemini-flash-latest", "gemini-3.5-flash"]:
-            if fallback not in models_to_try:
-                models_to_try.append(fallback)
+        candidates_in_order = [self.model] + [m for m in FALLBACK_MODELS if m != self.model]
+        models_to_try = model_health.order(candidates_in_order)
+        level = self.config.get("thinkingLevel") or DEFAULT_CONFIG["thinkingLevel"]
+        deadline = time.monotonic() + TOTAL_TIME_BUDGET
 
         errors_by_model: Dict[str, str] = {}
         for model_name in models_to_try:
-            url = f"{GEMINI_API_BASE}/models/{model_name}:generateContent"
+            remaining = deadline - time.monotonic()
+            if remaining < 3:
+                errors_by_model[model_name] = f"not tried, the {TOTAL_TIME_BUDGET:.0f}s time limit ran out"
+                continue
+            cooling = model_health.cooldown_left(model_name)
+            if cooling:
+                logger.info(f"Trying {model_name} although it is cooling down ({cooling:.0f}s left): no healthier model answered")
 
-            payload: Dict[str, Any] = {
-                "contents": contents,
-                "generationConfig": {
-                    "temperature": 0.7,
-                    "maxOutputTokens": 2048,
-                }
-            }
-
-            if system_instruction:
-                payload["systemInstruction"] = {
-                    "parts": [{"text": system_instruction}]
-                }
-
+            thinking = None if model_name in model_health.no_thinking else thinking_config_for(model_name, level)
+            attempt_timeout = httpx.Timeout(min(ATTEMPT_TIMEOUT, remaining), connect=CONNECT_TIMEOUT)
             try:
-                async with httpx.AsyncClient(timeout=30.0) as client:
-                    resp = await client.post(url, json=payload, headers=self._auth_headers())
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        candidates = data.get("candidates", [])
-                        if not candidates:
-                            errors_by_model[model_name] = "No candidates returned in response"
-                            continue
-
-                        parts = candidates[0].get("content", {}).get("parts", [])
-                        full_text = "".join(p.get("text", "") for p in parts if "text" in p and p.get("text"))
-                        if full_text.strip():
-                            if model_name != self.model:
-                                logger.info(f"Fallback model '{model_name}' succeeded after primary model '{self.model}' failed.")
-                            return full_text
-                        errors_by_model[model_name] = "Empty text parts returned"
-                        continue
-
-                    error_detail = resp.text
-                    try:
-                        err_json = resp.json()
-                        error_detail = err_json.get("error", {}).get("message", resp.text)
-                    except Exception:
-                        pass
-                    err_msg = f"HTTP {resp.status_code}: {error_detail}"
-                    errors_by_model[model_name] = err_msg
-                    logger.warning(f"Gemini call to {model_name} failed: {err_msg}")
+                async with httpx.AsyncClient(timeout=attempt_timeout) as client:
+                    resp = await client.post(
+                        f"{GEMINI_API_BASE}/models/{model_name}:generateContent",
+                        json=self._build_payload(contents, system_instruction, thinking),
+                        headers=self._auth_headers(),
+                    )
+                    if resp.status_code == 400 and thinking and "thinking" in resp.text.lower():
+                        # This model rejects our thinking setting: remember that and retry with its default
+                        model_health.no_thinking.add(model_name)
+                        logger.info(f"{model_name} rejected thinkingConfig {thinking}; retrying with the model default")
+                        resp = await client.post(
+                            f"{GEMINI_API_BASE}/models/{model_name}:generateContent",
+                            json=self._build_payload(contents, system_instruction, None),
+                            headers=self._auth_headers(),
+                        )
+            except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+                # Every model lives on the same host, so trying the others won't help
+                raise RuntimeError(
+                    f"Can't reach the Gemini API ({type(e).__name__}). Check your internet connection and try again."
+                ) from e
             except httpx.TimeoutException:
-                err_msg = f"Request timed out on {model_name} after 30s"
+                err_msg = f"Request timed out on {model_name} after {attempt_timeout.read:.0f}s"
                 errors_by_model[model_name] = err_msg
-                logger.warning(err_msg)
+                model_health.failed(model_name)
+                logger.warning(f"{err_msg}; skipping it for {model_health.cooldown_left(model_name):.0f}s")
+                continue
             except Exception as e:
                 err_msg = f"Error calling {model_name}: {str(e)}"
                 errors_by_model[model_name] = err_msg
                 logger.warning(err_msg)
+                continue
+
+            if resp.status_code == 200:
+                text, problem = _extract_text(resp.json())
+                if text:
+                    model_health.succeeded(model_name)
+                    if model_name != self.model:
+                        logger.info(f"Fallback model '{model_name}' answered because '{self.model}' was unavailable.")
+                    return text
+                errors_by_model[model_name] = problem
+                continue
+
+            error_detail, retry_after = _parse_error(resp)
+            err_msg = f"HTTP {resp.status_code}: {error_detail}"
+            errors_by_model[model_name] = err_msg
+            if resp.status_code in (401, 403):
+                # A bad or restricted key fails the same way on every model
+                raise RuntimeError(f"Gemini rejected the API key: {err_msg}")
+            if resp.status_code in (404, 429, 500, 502, 503, 504):
+                model_health.failed(model_name, retry_after=retry_after, not_found=resp.status_code == 404)
+                logger.warning(f"Gemini call to {model_name} failed: {err_msg}; skipping it for {model_health.cooldown_left(model_name):.0f}s")
+            else:
+                logger.warning(f"Gemini call to {model_name} failed: {err_msg}")
 
         primary_err = errors_by_model.get(self.model, "Unknown error")
         details = [f"[{m}] {err}" for m, err in errors_by_model.items()]
@@ -313,6 +428,22 @@ class GeminiClient:
             f"Configured Gemini model '{self.model}' failed: {primary_err}. "
             f"All attempted models failed: {'; '.join(details)}"
         )
+
+    @staticmethod
+    def _build_payload(
+        contents: List[Dict[str, Any]], system_instruction: Optional[str], thinking: Optional[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        generation_config: Dict[str, Any] = {
+            "temperature": 0.7,
+            # Thinking tokens count towards this limit, so leave room for them
+            "maxOutputTokens": 4096,
+        }
+        if thinking:
+            generation_config["thinkingConfig"] = thinking
+        payload: Dict[str, Any] = {"contents": contents, "generationConfig": generation_config}
+        if system_instruction:
+            payload["systemInstruction"] = {"parts": [{"text": system_instruction}]}
+        return payload
 
     async def analyze_vocab(
         self,
