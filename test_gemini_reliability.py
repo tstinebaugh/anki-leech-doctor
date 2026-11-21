@@ -156,3 +156,88 @@ async def test_thought_parts_are_not_returned_as_text():
     with patch("httpx.AsyncClient.post") as mock_post:
         mock_post.return_value = _resp(200, body)
         assert await client._call_gemini(HELLO) == "answer"
+
+
+DAILY_QUOTA = [
+    {"@type": "type.googleapis.com/google.rpc.QuotaFailure", "violations": [{
+        "description": "Generate content requests per day limit exceeded on Free Tier.",
+        "quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier",
+    }]},
+    {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "79789s"},
+]
+
+
+@pytest.mark.anyio
+async def test_used_up_daily_quota_blocks_the_model_until_reset():
+    client = _client()
+    with patch("httpx.AsyncClient.post") as mock_post:
+        mock_post.side_effect = [_err(429, "You exceeded your current quota", DAILY_QUOTA), _ok()]
+        await client._call_gemini(HELLO)
+        # Blocked for the ~22h Google reported, not the 10-minute overload cap
+        assert 79780 < model_health.cooldown_left("gemini-flash-latest") <= 79789
+        assert model_health.is_blocked("gemini-flash-latest")
+
+        mock_post.reset_mock()
+        # Even when every other model fails, the blocked one is not asked again
+        mock_post.side_effect = [_err(503, "busy"), _err(503, "busy")]
+        with pytest.raises(RuntimeError) as exc:
+            await client._call_gemini(HELLO)
+        assert "gemini-flash-latest" not in _models(mock_post)
+        assert "daily quota used up" in str(exc.value)
+
+
+@pytest.mark.anyio
+async def test_daily_quota_without_retry_delay_waits_for_pacific_midnight():
+    client = _client()
+    with patch("httpx.AsyncClient.post") as mock_post:
+        mock_post.side_effect = [_err(429, "quota", DAILY_QUOTA[:1]), _ok()]
+        await client._call_gemini(HELLO)
+    left = model_health.cooldown_left("gemini-flash-latest")
+    assert 60 <= left <= 24 * 3600 and model_health.is_blocked("gemini-flash-latest")
+
+
+def test_quota_reset_is_midnight_pacific():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from gemini_client import seconds_until_quota_reset
+    eleven_pm = datetime(2026, 11, 21, 23, 0, tzinfo=ZoneInfo("America/Los_Angeles")).timestamp()
+    assert seconds_until_quota_reset(eleven_pm) == 3600
+
+
+@pytest.mark.anyio
+async def test_all_models_blocked_fails_without_any_request():
+    for m in ["gemini-flash-latest", "gemini-3-flash-preview", "gemini-flash-lite-latest"]:
+        model_health.failed(m, retry_after=3600, hard=True, reason="daily quota used up")
+    client = _client()
+    with patch("httpx.AsyncClient.post") as mock_post:
+        with pytest.raises(RuntimeError, match="out of quota") as exc:
+            await client._call_gemini(HELLO)
+        assert mock_post.call_count == 0
+    assert "can be used again until" in str(exc.value)
+
+
+def test_cooldowns_survive_a_restart(tmp_path):
+    from gemini_client import ModelHealth
+    path = str(tmp_path / "health.json")
+    first = ModelHealth(path)
+    first.failed("gemini-flash-latest", retry_after=3600, hard=True, reason="daily quota used up")
+    first.failed("gemini-3-flash-preview", retry_after=5, reason="rate limited")
+
+    second = ModelHealth(path)  # e.g. after uvicorn --reload
+    assert second.is_blocked("gemini-flash-latest")
+    assert second.reason("gemini-flash-latest") == "daily quota used up"
+    assert 3590 < second.cooldown_left("gemini-flash-latest") <= 3600
+
+    second.succeeded("gemini-flash-latest")
+    assert not ModelHealth(path).is_blocked("gemini-flash-latest")
+
+
+def test_expired_and_broken_cooldown_files_are_ignored(tmp_path):
+    import json
+    import time
+    from gemini_client import ModelHealth
+    path = tmp_path / "health.json"
+    path.write_text(json.dumps({"gemini-flash-latest": {"until": time.time() - 1, "hard": True}}))
+    assert not ModelHealth(str(path)).cooldown_left("gemini-flash-latest")
+    path.write_text("{not json")
+    assert ModelHealth(str(path)).order(["gemini-flash-latest"]) == (["gemini-flash-latest"], [])

@@ -3,12 +3,15 @@ import json
 import re
 import time
 import logging
+import tempfile
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 import httpx
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-from config_defaults import CONFIG_PATH as DEFAULT_CONFIG_PATH, DEFAULT_CONFIG
+from config_defaults import CONFIG_PATH as DEFAULT_CONFIG_PATH, DEFAULT_CONFIG, MODEL_HEALTH_PATH
 
 GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
 
@@ -26,49 +29,148 @@ TOTAL_TIME_BUDGET = 60.0   # seconds for one call across all models
 COOLDOWN_BASE = 60.0       # first failure; doubles on each consecutive failure
 COOLDOWN_MAX = 600.0
 COOLDOWN_NOT_FOUND = 3600.0
+COOLDOWN_QUOTA_MAX = 26 * 3600.0  # a daily quota resets within a day; ignore anything longer
+QUOTA_RESET_TZ = "America/Los_Angeles"  # Gemini's daily quotas reset at midnight Pacific
 
 
 class ModelHealth:
-    """Remembers which models recently failed so later calls try healthy ones first."""
+    """Remembers which models recently failed so later calls avoid them.
 
-    def __init__(self) -> None:
+    Two kinds of cooldown:
+    - soft (overloaded, timed out, 5xx): skipped while a healthier model is available,
+      still tried as a last resort; 60s, doubling per consecutive failure up to 10 min;
+    - hard (quota used up, model not found): not tried at all until it ends. For a 429
+      that is when Google says the quota resets, e.g. midnight Pacific for daily quotas.
+
+    Cooldowns use wall-clock time and are saved to a small JSON file, so restarting the
+    server doesn't forget that today's quota is gone.
+    """
+
+    def __init__(self, path: Optional[str] = None) -> None:
+        self.path = path
         self._until: Dict[str, float] = {}
+        self._hard: set = set()
+        self._reason: Dict[str, str] = {}
         self._strikes: Dict[str, int] = {}
         self.no_thinking: set = set()  # models that rejected our thinkingConfig
+        self._load()
+
+    def _load(self) -> None:
+        if not self.path or not os.path.exists(self.path):
+            return
+        try:
+            with open(self.path, "r", encoding="utf-8") as f:
+                saved = json.load(f)
+            now = time.time()
+            for model, entry in saved.items():
+                if float(entry["until"]) > now:
+                    self._until[model] = float(entry["until"])
+                    self._reason[model] = str(entry.get("reason", ""))
+                    if entry.get("hard"):
+                        self._hard.add(model)
+        except Exception as e:
+            logger.warning(f"Ignoring unreadable model cooldown file {self.path}: {e}")
+
+    def _save(self) -> None:
+        if not self.path:
+            return
+        now = time.time()
+        data = {
+            m: {"until": t, "hard": m in self._hard, "reason": self._reason.get(m, "")}
+            for m, t in self._until.items() if t > now
+        }
+        try:
+            directory = os.path.dirname(self.path) or "."
+            os.makedirs(directory, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=directory, prefix=".model_health-", suffix=".tmp")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=1)
+            os.replace(tmp, self.path)
+        except OSError as e:
+            logger.warning(f"Could not save model cooldowns to {self.path}: {e}")
 
     def cooldown_left(self, model: str) -> float:
-        return max(0.0, self._until.get(model, 0.0) - time.monotonic())
+        return max(0.0, self._until.get(model, 0.0) - time.time())
 
-    def failed(self, model: str, retry_after: Optional[float] = None, not_found: bool = False) -> None:
+    def available_at(self, model: str) -> float:
+        return self._until.get(model, 0.0)
+
+    def is_blocked(self, model: str) -> bool:
+        return model in self._hard and self.cooldown_left(model) > 0
+
+    def reason(self, model: str) -> str:
+        return self._reason.get(model, "")
+
+    def failed(self, model: str, retry_after: Optional[float] = None, hard: bool = False, reason: str = "") -> None:
         strikes = self._strikes.get(model, 0) + 1
         self._strikes[model] = strikes
-        if not_found:
+        if retry_after:
+            seconds = min(max(retry_after, 5.0), COOLDOWN_QUOTA_MAX)
+        elif hard:
             seconds = COOLDOWN_NOT_FOUND
-        elif retry_after:
-            seconds = min(max(retry_after, 5.0), COOLDOWN_MAX)
         else:
             seconds = min(COOLDOWN_BASE * 2 ** (strikes - 1), COOLDOWN_MAX)
-        self._until[model] = time.monotonic() + seconds
+        self._until[model] = time.time() + seconds
+        self._reason[model] = reason
+        if hard:
+            self._hard.add(model)
+        else:
+            self._hard.discard(model)
+        self._save()
 
     def succeeded(self, model: str) -> None:
-        self._until.pop(model, None)
         self._strikes.pop(model, None)
+        if self._until.pop(model, None) is not None:
+            self._hard.discard(model)
+            self._reason.pop(model, None)
+            self._save()
 
-    def order(self, models: List[str]) -> List[str]:
-        """Healthy models first in their given order, then cooling ones, soonest-recovering first."""
+    def order(self, models: List[str]) -> Tuple[List[str], List[str]]:
+        """(models to try, models blocked until their cooldown ends).
+
+        Healthy models come first in their given order, then soft-cooling ones,
+        soonest-recovering first."""
         seen: List[str] = []
         for m in models:
             if m not in seen:
                 seen.append(m)
-        healthy = [m for m in seen if not self.cooldown_left(m)]
-        cooling = sorted((m for m in seen if self.cooldown_left(m)), key=self.cooldown_left)
-        return healthy + cooling
+        blocked = [m for m in seen if self.is_blocked(m)]
+        rest = [m for m in seen if m not in blocked]
+        healthy = [m for m in rest if not self.cooldown_left(m)]
+        cooling = sorted((m for m in rest if self.cooldown_left(m)), key=self.cooldown_left)
+        return healthy + cooling, blocked
 
     def reset(self) -> None:
-        self.__init__()
+        self._until.clear()
+        self._hard.clear()
+        self._reason.clear()
+        self._strikes.clear()
+        self.no_thinking.clear()
+        if self.path and os.path.exists(self.path):
+            os.remove(self.path)
 
 
-model_health = ModelHealth()
+def seconds_until_quota_reset(now: Optional[float] = None) -> float:
+    """Seconds until the next midnight Pacific, when Gemini's daily quotas reset."""
+    try:
+        tz = ZoneInfo(QUOTA_RESET_TZ)
+    except Exception:
+        return COOLDOWN_NOT_FOUND
+    current = datetime.fromtimestamp(now if now is not None else time.time(), tz)
+    midnight = (current + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return max(60.0, (midnight - current).total_seconds())
+
+
+def describe_until(timestamp: float) -> str:
+    """'until 17:00 (in 22h 10m)' in local time, for logs and error messages."""
+    left = max(0, int(timestamp - time.time()))
+    at = datetime.fromtimestamp(timestamp)
+    day = "" if at.date() == datetime.now().date() else f" {at:%a}"
+    span = f"{left // 3600}h {left % 3600 // 60}m" if left >= 3600 else f"{left // 60}m {left % 60}s"
+    return f"until{day} {at:%H:%M} (in {span})"
+
+
+model_health = ModelHealth(MODEL_HEALTH_PATH)
 
 
 def thinking_config_for(model: str, level: str) -> Optional[Dict[str, Any]]:
@@ -96,13 +198,14 @@ def _extract_text(data: Dict[str, Any]) -> Tuple[str, str]:
     return "", "Empty text parts returned"
 
 
-def _parse_error(resp: httpx.Response) -> Tuple[str, Optional[float]]:
-    """Error message and, for rate limits, the retry delay Google suggests (in seconds)."""
+def _parse_error(resp: httpx.Response) -> Tuple[str, Optional[float], bool]:
+    """(message, seconds until Google says to retry, whether a daily quota ran out)."""
     try:
         err = resp.json().get("error", {})
     except Exception:
-        return resp.text, None
+        return resp.text, None, False
     retry_after = None
+    daily = False
     for detail in err.get("details", []) or []:
         delay = str(detail.get("retryDelay", ""))
         if delay.endswith("s"):
@@ -110,7 +213,11 @@ def _parse_error(resp: httpx.Response) -> Tuple[str, Optional[float]]:
                 retry_after = float(delay[:-1])
             except ValueError:
                 pass
-    return err.get("message", resp.text), retry_after
+        for violation in detail.get("violations", []) or []:
+            quota = f"{violation.get('quotaId', '')} {violation.get('description', '')}".lower()
+            if "perday" in quota or "per day" in quota:
+                daily = True
+    return err.get("message", resp.text), retry_after, daily
 
 
 KANJI_CHARS = r"\u4e00-\u9faf々〆ヶ"
@@ -351,11 +458,21 @@ class GeminiClient:
             raise ValueError("Gemini API key is not configured. Please set your API key in the UI settings or config.json.")
 
         candidates_in_order = [self.model] + [m for m in FALLBACK_MODELS if m != self.model]
-        models_to_try = model_health.order(candidates_in_order)
+        models_to_try, blocked = model_health.order(candidates_in_order)
         level = self.config.get("thinkingLevel") or DEFAULT_CONFIG["thinkingLevel"]
         deadline = time.monotonic() + TOTAL_TIME_BUDGET
 
-        errors_by_model: Dict[str, str] = {}
+        errors_by_model: Dict[str, str] = {
+            m: f"skipped, {model_health.reason(m) or 'unavailable'} {describe_until(model_health.available_at(m))}"
+            for m in blocked
+        }
+        if not models_to_try:
+            soonest = min(blocked, key=model_health.available_at)
+            raise RuntimeError(
+                f"All Gemini models are out of quota or unavailable. {soonest} can be used again "
+                f"{describe_until(model_health.available_at(soonest))}. "
+                f"Details: {'; '.join(f'[{m}] {e}' for m, e in errors_by_model.items())}"
+            )
         for model_name in models_to_try:
             remaining = deadline - time.monotonic()
             if remaining < 3:
@@ -391,8 +508,8 @@ class GeminiClient:
             except httpx.TimeoutException:
                 err_msg = f"Request timed out on {model_name} after {attempt_timeout.read:.0f}s"
                 errors_by_model[model_name] = err_msg
-                model_health.failed(model_name)
-                logger.warning(f"{err_msg}; skipping it for {model_health.cooldown_left(model_name):.0f}s")
+                model_health.failed(model_name, reason="timed out")
+                logger.warning(f"{err_msg}; skipping it {describe_until(model_health.available_at(model_name))}")
                 continue
             except Exception as e:
                 err_msg = f"Error calling {model_name}: {str(e)}"
@@ -410,15 +527,26 @@ class GeminiClient:
                 errors_by_model[model_name] = problem
                 continue
 
-            error_detail, retry_after = _parse_error(resp)
+            error_detail, retry_after, daily_quota = _parse_error(resp)
             err_msg = f"HTTP {resp.status_code}: {error_detail}"
             errors_by_model[model_name] = err_msg
             if resp.status_code in (401, 403):
                 # A bad or restricted key fails the same way on every model
                 raise RuntimeError(f"Gemini rejected the API key: {err_msg}")
-            if resp.status_code in (404, 429, 500, 502, 503, 504):
-                model_health.failed(model_name, retry_after=retry_after, not_found=resp.status_code == 404)
-                logger.warning(f"Gemini call to {model_name} failed: {err_msg}; skipping it for {model_health.cooldown_left(model_name):.0f}s")
+            if resp.status_code == 429:
+                if daily_quota and not retry_after:
+                    retry_after = seconds_until_quota_reset()
+                # With a known reset time the model will refuse until then: don't try it at all
+                model_health.failed(
+                    model_name, retry_after=retry_after, hard=retry_after is not None,
+                    reason="daily quota used up" if daily_quota else "rate limited",
+                )
+            elif resp.status_code == 404:
+                model_health.failed(model_name, hard=True, reason="model not found")
+            elif resp.status_code in (500, 502, 503, 504):
+                model_health.failed(model_name, reason=f"overloaded (HTTP {resp.status_code})")
+            if model_health.cooldown_left(model_name):
+                logger.warning(f"Gemini call to {model_name} failed: {err_msg}; skipping it {describe_until(model_health.available_at(model_name))}")
             else:
                 logger.warning(f"Gemini call to {model_name} failed: {err_msg}")
 

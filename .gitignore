@@ -21,6 +21,9 @@ Thumbs.db
 # Local vector database storage
 .rag_storage/
 
+# Gemini model cooldowns (rate limits, used-up quotas)
+.model_health.json
+
 # Virtual environments
 .venv/
 venv/

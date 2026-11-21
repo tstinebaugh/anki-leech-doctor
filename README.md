@@ -271,7 +271,7 @@ All settings are stored locally in `config.json` (git-ignored). Only the keys yo
 - **"Note type … was not found in Anki"** when adding a mined card: set **Mining Note Type** in Settings to a note type you have, or install the *Ankidrone Essentials* deck for `Japanese sentences`.
 - **"All Review Cards" is empty or shows the wrong cards**: check **"All Review Cards" Scope** in Settings. Leave it empty to use your whole collection.
 - **Slow or timed-out Gemini calls, or "high demand" (HTTP 503)**: Google's popular Flash models are often overloaded. The app waits at most 25s per model, then falls back to `gemini-3-flash-preview` and `gemini-flash-lite-latest`, and skips a model that just failed for 1 to 10 minutes. If it keeps happening, choose `gemini-3-flash-preview` as the model in Settings.
-- **Gemini errors mentioning quota (HTTP 429)**: the free tier's daily limit is used up. Wait for the reset, or pick another model in Settings.
+- **Gemini errors mentioning quota (HTTP 429)**: that model's free-tier limit is used up. The app stops asking it until the time Google says the quota resets (midnight Pacific for daily limits) and uses the fallback models meanwhile. It remembers this across restarts in `.model_health.json`; delete that file to try again sooner, e.g. after upgrading your plan.
 - **"Invalid host header"**: you opened the app under a host name that isn't allowed. Use `http://127.0.0.1:8766` or set `LEECH_DOCTOR_ALLOWED_HOSTS`.
 
 ---
