@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 from config_defaults import CONFIG_PATH as DEFAULT_CONFIG_PATH, DEFAULT_CONFIG, MODEL_HEALTH_PATH
+from furigana import clean_sentence_pair, kanji_without_reading, normalize_furigana
 
 GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
 
@@ -221,30 +222,6 @@ def _parse_error(resp: httpx.Response) -> Tuple[str, Optional[float], bool]:
 
 
 KANJI_CHARS = r"\u4e00-\u9faf々〆ヶ"
-PRE_KANJI_REGEX = re.compile(rf"([^ \t\n><{KANJI_CHARS}])([{KANJI_CHARS}]+\[[^\]]+\])")
-BRACKET_KANJI_REGEX = re.compile(rf"(\])([{KANJI_CHARS}]+\[[^\]]+\])")
-TAG_KANJI_REGEX = re.compile(rf"<b>([{KANJI_CHARS}]+\[[^\]]+\])")
-
-def format_anki_furigana(text: str) -> str:
-    """
-    Ensures standard Anki furigana spacing before each kanji block.
-    Anki's {{furigana:Field}} filter requires a leading space before each kanji block
-    so that preceding kana/text is not mistakenly grouped into the ruby text.
-    Example: '来週[らいしゅう]の 社員[しゃいん] 旅行[りょこう]に<b> 参加[さんか]</b>します。'
-    """
-    if not text:
-        return ""
-    # Ensure space inside <b> tag if kanji block follows directly: <b>参加[さんか] -> <b> 参加[さんか]
-    text = TAG_KANJI_REGEX.sub(r"<b> \1", text)
-    # Ensure space before <b> tag if preceded by non-space non->: に<b> -> に <b>
-    text = re.sub(rf"([^ \t\n>])(<b>\s*[{KANJI_CHARS}]+\[)", r"\1 \2", text)
-    # Ensure space if previous block ended with ] and next starts with kanji: ]社員[しゃいん] -> ] 社員[しゃいん]
-    text = BRACKET_KANJI_REGEX.sub(r"\1 \2", text)
-    # Ensure space if previous char was kana, punctuation or symbol: の社員[しゃいん] -> の 社員[しゃいん]
-    text = PRE_KANJI_REGEX.sub(r"\1 \2", text)
-    # Clean up duplicate whitespace
-    text = re.sub(r"[ \t]+", " ", text)
-    return text.strip()
 
 def _strip_json_fences(raw: str) -> str:
     """Removes ```json fences a model sometimes wraps around a JSON reply."""
@@ -254,6 +231,23 @@ def _strip_json_fences(raw: str) -> str:
         if clean.endswith("```"):
             clean = clean.rsplit("```", 1)[0]
     return clean.strip()
+
+
+def keep_target_bold(sent_furigana: str, target: str) -> str:
+    """Removes <b> from spans that don't contain the target word, when at least one does.
+
+    Models sometimes bold extra words ('<b>猫</b>が<b>王様</b>のように<b>振る舞う</b>').
+    """
+    kanji = re.findall(rf"[{KANJI_CHARS}]", target)
+
+    def has_target(span: str) -> bool:
+        plain = re.sub(r"\[[^\]]*\]|\s", "", span)
+        return any(k in plain for k in kanji) if kanji else target.strip("〜～ ") in plain
+
+    spans = re.findall(r"<b>(.*?)</b>", sent_furigana)
+    if len(spans) < 2 or not any(has_target(sp) for sp in spans):
+        return sent_furigana
+    return re.sub(r"<b>(.*?)</b>", lambda m: m.group(0) if has_target(m.group(1)) else m.group(1), sent_furigana)
 
 
 def validate_persona_sentence(parsed: Dict[str, Any], vocab_kanji: str, is_grammar: bool = False) -> Tuple[bool, List[str]]:
@@ -319,13 +313,11 @@ def validate_persona_sentence(parsed: Dict[str, Any], vocab_kanji: str, is_gramm
         errors.append("sent_kanji contains parenthetical kana reading. It must be clean text without furigana.")
 
     # Check 4: In sent_furigana, every kanji word must have bracket furigana
-    text_without_brackets = re.sub(rf"[{KANJI_CHARS}]+\[[^\]]+\]", "", sent_furigana)
-    text_clean = re.sub(r"<[^>]+>", "", text_without_brackets)
-    leftover_kanji = re.findall(rf"[{KANJI_CHARS}]", text_clean)
-    if leftover_kanji:
-        unique_leftovers = "".join(sorted(set(leftover_kanji)))
+    # (checked on the normalized text with Anki's own block rule, so 振る舞[ふるま]う passes)
+    missing = kanji_without_reading(sent_furigana)
+    if missing:
         errors.append(
-            f"In sent_furigana, the following kanji are missing bracket furigana [reading]: '{unique_leftovers}'. "
+            f"In sent_furigana, the following kanji are missing bracket furigana [reading]: '{missing}'. "
             "Every single kanji word must have [reading] so Anki displays readings above the kanji."
         )
 
@@ -623,14 +615,17 @@ Return valid JSON with keys:
 
         try:
             parsed = json.loads(clean_json)
+            sent_kanji, sent_furigana = clean_sentence_pair(
+                str(parsed.get("sent_kanji", "") or ""), str(parsed.get("sent_furigana", "") or "")
+            )
             return {
                 "vocabKanji": parsed.get("vocab_kanji", vocab_input.strip()),
-                "vocabFurigana": parsed.get("vocab_furigana", vocab_input.strip()),
+                "vocabFurigana": normalize_furigana(str(parsed.get("vocab_furigana") or vocab_input.strip())),
                 "vocabDef": parsed.get("vocab_def", ""),
                 "pitchNum": str(parsed.get("pitch_num", "") or ""),
                 "pitchPattern": parsed.get("pitch_pattern", ""),
-                "sentKanji": parsed.get("sent_kanji", ""),
-                "sentFurigana": parsed.get("sent_furigana", ""),
+                "sentKanji": sent_kanji,
+                "sentFurigana": sent_furigana,
                 "sentEng": parsed.get("sent_eng", ""),
             }
         except Exception:
@@ -724,14 +719,15 @@ Return valid JSON with keys:
         # form must spell exactly the pattern (e.g. '〜 堂[だけ]でなく' -> rejected).
         if re.sub(r"\s|\[[^\]]*\]", "", pattern_furigana) != re.sub(r"\s", "", pattern):
             pattern_furigana = pattern
+        sent_kanji, sent_furigana = clean_sentence_pair(str(parsed.get("sent_kanji", "") or ""), raw_furigana)
         return {
             "vocabKanji": pattern,
-            "vocabFurigana": pattern_furigana,
+            "vocabFurigana": normalize_furigana(pattern_furigana),
             "vocabDef": str(parsed.get("meaning", "") or "").strip(),
             "pitchNum": "",
             "pitchPattern": "",
-            "sentKanji": str(parsed.get("sent_kanji", "") or "").strip(),
-            "sentFurigana": format_anki_furigana(raw_furigana) if raw_furigana else "",
+            "sentKanji": sent_kanji,
+            "sentFurigana": sent_furigana,
             "sentEng": str(parsed.get("sent_eng", "") or "").strip(),
             "notes": "\n\n".join(notes_parts),
             "jlptLevel": level,
@@ -1081,14 +1077,20 @@ Return valid JSON with keys: theme_used, sent_kanji, sent_furigana, sent_eng, ra
                 parsed = None
 
             if parsed and isinstance(parsed, dict):
+                # Fix spacing, okurigana and stray readings in code first, so only problems
+                # that need the model (missing readings or bold tags) cost a retry
+                furigana = str(parsed.get("sent_furigana", "") or "")
+                if not is_grammar:
+                    furigana = keep_target_bold(furigana, vocab_kanji)
+                parsed["sent_kanji"], parsed["sent_furigana"] = clean_sentence_pair(
+                    str(parsed.get("sent_kanji", "") or ""), furigana
+                )
                 is_valid, errors = validate_persona_sentence(parsed, vocab_kanji, is_grammar=is_grammar)
                 if is_valid:
-                    raw_furigana = parsed.get("sent_furigana", "")
-                    formatted_furigana = format_anki_furigana(raw_furigana)
                     return {
                         "themeUsed": parsed.get("theme_used", active_personas[0]),
-                        "sentKanji": str(parsed.get("sent_kanji", "")).strip(),
-                        "sentFurigana": formatted_furigana,
+                        "sentKanji": parsed["sent_kanji"],
+                        "sentFurigana": parsed["sent_furigana"],
                         "sentEng": str(parsed.get("sent_eng", "")).strip(),
                         "rationale": str(parsed.get("rationale", "")).strip()
                     }
@@ -1124,7 +1126,7 @@ Return valid JSON with keys: theme_used, sent_kanji, sent_furigana, sent_eng, ra
             sent_furigana = str(parsed.get("sent_furigana", "")).strip()
             if "<b>" not in sent_furigana and vocab_kanji in sent_furigana:
                 sent_furigana = sent_furigana.replace(vocab_kanji, f"<b>{vocab_kanji}</b>", 1)
-            formatted_furigana = format_anki_furigana(sent_furigana)
+            formatted_furigana = normalize_furigana(sent_furigana)
 
             return {
                 "themeUsed": parsed.get("theme_used", active_personas[0]),
