@@ -33,6 +33,9 @@ DEFAULT_PERSONA = (
 DEFAULT_CONFIG = {
     "apiKey": "",  # falls back to the GEMINI_API_KEY / GOOGLE_API_KEY env vars
     "model": DEFAULT_MODEL,
+    # Gemini 3+ thinking cap. The model thinks only as much as a task needs, so short requests cost
+    # about the same at any level; "medium" leaves room for nuanced grammar and readings.
+    "thinkingLevel": "medium",
     "jlptLevel": "N3",
     "kanjiDeckName": DEFAULT_KANJI_DECK,
     "kanjiStrategy": "hybrid",  # "hybrid" (deck stories + AI fallback) or "ai_only"
