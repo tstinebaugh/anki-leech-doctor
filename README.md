@@ -44,6 +44,7 @@ Choose from 4 distinct mnemonic generation modes:
 - **Vocab**: input any Japanese word or phrase (e.g., `限界`, `見失う`, `一目惚れ`, `バイク`). The AI resolves canonical kanji, bracket furigana, a concise definition, constituent kanji stories, and pitch accent.
 - **Grammar**: input a pattern (e.g., `〜ばかり`, `〜ようにする`) and optionally the sentence where you saw it. The AI writes the meaning, formation rule, nuance and look-alike patterns into the card's notes.
 - **JLPT level for grammar**: *Auto* lets the AI place the pattern (N5–N1); pick a level to override it. Grammar cards go to `<grammar deck base>::<level>` (default `Mining::Grammar::N4`, etc.) and are tagged `grammar` and `jlpt::N4`.
+- **Already have it?** Before calling Gemini, the app looks the word or pattern up in Anki. If a note already has it, the modal lists the match (deck, meaning, suspended/leech) with *Open in Anki*, and no API requests are spent; *Mine Anyway* makes a new card regardless. Matching ignores formatting such as `〜`, readings, `[1]` markers and optional parts, and accepts any alternative (`しかない` finds `しか〜ない`, `んです` finds `〜のです / 〜んです`). Grammar mode only compares against grammar notes.
 - **Example sentence from your personas**: the card's example sentence is written by the Persona Sentence Studio using your active interests, and marked as already generated.
 - Preview and edit the draft before adding it to your mining deck (default `Mining`, created if missing). See [Mining note type](#-mining-note-type) for which note type is used.
 

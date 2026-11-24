@@ -143,6 +143,12 @@ class MiningAnalyzeRequest(BaseModel):
     jlptLevel: Optional[str] = None
     cardType: Optional[str] = "vocab"
     personas: Optional[List[str]] = None
+    # False: if the word is already in a deck, return those notes instead of analyzing
+    allowDuplicate: bool = False
+
+
+class BrowseNoteRequest(BaseModel):
+    noteId: int
 
 class SaveMinedCardRequest(BaseModel):
     vocabKanji: str
@@ -327,6 +333,16 @@ async def get_card_details(
         }
     except Exception as e:
         raise http_error(e)
+
+@app.post("/api/anki/browse")
+def browse_note(req: BrowseNoteRequest):
+    """Opens Anki's card browser on a note (e.g. an existing card found while mining)."""
+    try:
+        anki.open_in_browser(req.noteId)
+        return {"success": True}
+    except Exception as e:
+        raise http_error(e)
+
 
 @app.get("/api/gemini/usage")
 def gemini_usage():
@@ -519,6 +535,18 @@ async def analyze_mining_vocab(req: MiningAnalyzeRequest):
     # pattern; an explicit level is an override that decides the deck.
     requested_level = (req.jlptLevel or "").strip().upper()
     manual_grammar_level = requested_level if is_grammar and requested_level in JLPT_LEVELS else None
+    if not req.allowDuplicate:
+        # Checked before any Gemini request, so a word you already have costs no quota
+        try:
+            field_map = gemini.config.get("miningFieldMap") or {}
+            existing = await asyncio.to_thread(
+                anki.find_existing_notes, req.vocab.strip(), [field_map.get("vocabKanji")], grammar_only=is_grammar
+            )
+        except Exception as e:
+            logger.warning(f"Duplicate check skipped: {e}")
+            existing = []
+        if existing:
+            return {"duplicate": True, "query": req.vocab.strip(), "matches": existing}
     try:
         if is_grammar:
             analysis = await gemini.analyze_grammar(
