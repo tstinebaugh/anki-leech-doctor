@@ -14,8 +14,10 @@ REAL_ANKI_CONNECT_URL = os.environ.get("ANKI_CONNECT_URL", "http://127.0.0.1:876
 os.environ["ANKI_CONNECT_URL"] = "http://127.0.0.1:9"
 # Never fetch Gemini's model list in the background during tests
 os.environ["LEECH_DOCTOR_MODEL_REFRESH"] = "0"
-os.environ.pop("GEMINI_API_KEY", None)
-os.environ.pop("GOOGLE_API_KEY", None)
+# Never read your .env, and ignore API keys from the shell running the tests
+os.environ["LEECH_DOCTOR_DOTENV"] = "0"
+for _var in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENAI_COMPAT_API_KEY", "NVIDIA_API_KEY"):
+    os.environ.pop(_var, None)
 
 import pytest  # noqa: E402
 

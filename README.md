@@ -217,7 +217,7 @@ pip install -r requirements.txt
 ```
 
 ### 2. Configure Settings
-Copy the template configuration file and add your Gemini API key (or set the `GEMINI_API_KEY` environment variable):
+Copy the template configuration file and add your Gemini API key (or put `GEMINI_API_KEY=...` in a `.env` file, see `.env.example`):
 ```bash
 cp config.example.json config.json
 ```
@@ -281,7 +281,7 @@ All settings are stored locally in `config.json` (git-ignored). Only the keys yo
 
 ### 🛟 Fallback provider (NVIDIA NIM, OpenRouter or Ollama)
 
-On busy evenings every Gemini model can be out of quota or overloaded at the same time. You can add one OpenAI-compatible chat API as a last resort: it is asked only after every Gemini model has failed or been skipped, and every feature (mining, mnemonics, sentences, the Sensei chat) then works as usual. Set it in **Settings → AI Credentials & Model → Fallback provider**, or in `config.json`:
+On busy evenings every Gemini model can be out of quota or overloaded at the same time. You can add one OpenAI-compatible chat API as a last resort: it is asked only after every Gemini model has failed or been skipped, and every feature (mining, mnemonics, sentences, the Sensei chat) then works as usual. Set it in **Settings → AI Credentials & Model → Fallback provider**, or in `config.json`. The key can also go in `.env` (see [Environment variables](#environment-variables)): with `NVIDIA_API_KEY=nvapi-...` there, only the model is left to pick in Settings.
 
 | Provider | `openaiCompatBaseUrl` | `openaiCompatModel` (example) | Key |
 | :--- | :--- | :--- | :--- |
@@ -294,12 +294,18 @@ Remote providers get 60s to answer and a server on `localhost` gets 5 minutes, s
 
 ### Environment variables
 
+The app also reads a `.env` file next to `app.py` (git-ignored; start from `cp .env.example .env`). Variables already set in your shell win over `.env`, and keys saved in Settings win over both. Keys are never written to logs or error messages.
+
 | Variable | Default | Purpose |
 | :--- | :--- | :--- |
 | `ANKI_CONNECT_URL` | `http://127.0.0.1:8765` | Where AnkiConnect listens. |
 | `LEECH_DOCTOR_CONFIG` | `./config.json` | Config file path. |
 | `LEECH_DOCTOR_RAG_DIR` | `./.rag_storage` | Collision Radar index location. |
 | `LEECH_DOCTOR_DB` | `./leech_doctor.db` | SQLite database: Gemini call log, cooldowns, learned quotas. |
+| `GEMINI_API_KEY` / `GOOGLE_API_KEY` | – | Gemini API key, used when `apiKey` isn't set in Settings. |
+| `OPENAI_COMPAT_API_KEY` | – | [Fallback provider](#-fallback-provider-nvidia-nim-openrouter-or-ollama) key, used when `openaiCompatApiKey` isn't set in Settings. |
+| `NVIDIA_API_KEY` | – | NVIDIA NIM key, used when neither of the above is set. With only this key, `openaiCompatBaseUrl` defaults to `https://integrate.api.nvidia.com/v1`, so you just pick a model in Settings. |
+| `LEECH_DOCTOR_DOTENV` | `1` | Set to `0` to ignore the `.env` file. |
 | `LEECH_DOCTOR_ALLOWED_HOSTS` | `127.0.0.1,localhost` | Host names the server answers to. Add your machine's LAN name/IP if you open the app from another device (and start uvicorn with `--host 0.0.0.0`). |
 
 ---

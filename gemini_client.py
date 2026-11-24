@@ -57,6 +57,11 @@ QUOTA_RESET_TZ = "America/Los_Angeles"  # Gemini's daily quotas reset at midnigh
 # chat-completions server is asked last: NVIDIA NIM (build.nvidia.com), OpenRouter, or a local
 # Ollama / LM Studio. Config keys openaiCompatBaseUrl and openaiCompatModel turn it on;
 # openaiCompatApiKey is sent as a Bearer token. It is logged as "openai:<model>".
+# The key can also come from the environment (or .env, see config_defaults.py): first
+# OPENAI_COMPAT_API_KEY, then NVIDIA_API_KEY. With only NVIDIA_API_KEY set, the base URL
+# defaults to NVIDIA NIM, so an NVIDIA key and a model are all it takes.
+NVIDIA_NIM_BASE_URL = "https://integrate.api.nvidia.com/v1"
+OPENAI_COMPAT_KEY_ENV_VARS = ("OPENAI_COMPAT_API_KEY", "NVIDIA_API_KEY")
 OPENAI_COMPAT_TIMEOUT = 60.0         # remote providers answer in seconds when healthy
 OPENAI_COMPAT_LOCAL_TIMEOUT = 300.0  # a local 14B model on a laptop may take minutes
 OPENAI_COMPAT_MAX_TOKENS = 4096
@@ -703,12 +708,27 @@ class GeminiClient:
         return [m for m in models if not model_catalog.is_provider(str(m))] or list(FALLBACK_MODELS)
 
     @property
-    def openai_compat_base_url(self) -> str:
-        return str(self.config.get("openaiCompatBaseUrl") or "").strip().rstrip("/")
+    def openai_compat_key_source(self) -> Optional[str]:
+        """Where the provider key comes from: "config", an env var name, or None."""
+        if str(self.config.get("openaiCompatApiKey") or "").strip():
+            return "config"
+        return next((var for var in OPENAI_COMPAT_KEY_ENV_VARS if os.environ.get(var, "").strip()), None)
 
     @property
     def openai_compat_api_key(self) -> str:
-        return str(self.config.get("openaiCompatApiKey") or "").strip()
+        source = self.openai_compat_key_source
+        if source is None:
+            return ""
+        value = self.config.get("openaiCompatApiKey") if source == "config" else os.environ.get(source)
+        return str(value or "").strip()
+
+    @property
+    def openai_compat_base_url(self) -> str:
+        configured = str(self.config.get("openaiCompatBaseUrl") or "").strip().rstrip("/")
+        if configured:
+            return configured
+        # Only when the key is NVIDIA's: never send another provider's key to NVIDIA
+        return NVIDIA_NIM_BASE_URL if self.openai_compat_key_source == "NVIDIA_API_KEY" else ""
 
     @property
     def openai_compat_model(self) -> str:

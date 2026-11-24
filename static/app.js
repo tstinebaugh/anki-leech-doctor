@@ -973,17 +973,25 @@ function fillKeySettings(cfg) {
     el.settingApiKey.value = "";
     el.settingApiKey.placeholder = cfg.maskedKey ? `Saved: ${cfg.maskedKey}` : "AIzaSy...";
   }
-  if (el.settingOpenaiBaseUrl) el.settingOpenaiBaseUrl.value = cfg.openaiCompatBaseUrl || "";
+  if (el.settingOpenaiBaseUrl) {
+    el.settingOpenaiBaseUrl.value = cfg.openaiCompatBaseUrl || "";
+    el.settingOpenaiBaseUrl.placeholder = cfg.openaiCompatEffectiveBaseUrl
+      ? `${cfg.openaiCompatEffectiveBaseUrl} (default for NVIDIA_API_KEY)`
+      : "https://integrate.api.nvidia.com/v1";
+  }
   if (el.settingOpenaiModel) el.settingOpenaiModel.value = cfg.openaiCompatModel || "";
+  const keySource = cfg.openaiCompatKeySource;
   if (el.settingOpenaiApiKey) {
     el.settingOpenaiApiKey.value = "";
-    el.settingOpenaiApiKey.placeholder = cfg.maskedOpenaiCompatKey
-      ? `Saved: ${cfg.maskedOpenaiCompatKey}`
-      : "nvapi-... (not needed for Ollama)";
+    el.settingOpenaiApiKey.placeholder = !cfg.maskedOpenaiCompatKey
+      ? "nvapi-... (not needed for Ollama)"
+      : keySource && keySource !== "config"
+        ? `From ${keySource}: ${cfg.maskedOpenaiCompatKey}`
+        : `Saved: ${cfg.maskedOpenaiCompatKey}`;
   }
   if (el.settingOpenaiClearKey) el.settingOpenaiClearKey.checked = false;
   const compatSection = document.getElementById("openai-compat-settings");
-  if (compatSection && cfg.openaiCompatBaseUrl) compatSection.open = true;
+  if (compatSection && (cfg.openaiCompatEffectiveBaseUrl || keySource)) compatSection.open = true;
 }
 
 function updateMnemonicStyleButtons(selectedStyle) {

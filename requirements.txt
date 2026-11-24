@@ -5,3 +5,4 @@ httpx>=0.27.0
 numpy>=2.0
 sqlalchemy>=2.0,<3.0
 alembic>=1.13
+python-dotenv>=1.0  # optional .env file with API keys

@@ -401,3 +401,89 @@ def test_settings_save_and_mask_the_provider_key(api):
     assert client.post("/api/config", json={"openaiCompatBaseUrl": "integrate.api.nvidia.com"}).status_code == 400
     client.post("/api/config", json={"openaiCompatBaseUrl": "", "openaiCompatModel": ""})
     assert app_module.gemini.openai_compat_name is None
+
+
+# ---- keys from the environment (or .env) ------------------------------------------------------
+
+ENV_KEY = "nvapi-from-the-environment-9876"
+
+
+@pytest.fixture
+def no_env_keys(monkeypatch):
+    for var in gemini_client.OPENAI_COMPAT_KEY_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+    return monkeypatch
+
+
+def test_key_falls_back_to_env_vars_in_order(no_env_keys):
+    client = _client(key="")
+    assert client.openai_compat_api_key == "" and client.openai_compat_key_source is None
+    no_env_keys.setenv("NVIDIA_API_KEY", "nvapi-nvidia")
+    assert client.openai_compat_api_key == "nvapi-nvidia" and client.openai_compat_key_source == "NVIDIA_API_KEY"
+    no_env_keys.setenv("OPENAI_COMPAT_API_KEY", "sk-generic")
+    assert client.openai_compat_api_key == "sk-generic" and client.openai_compat_key_source == "OPENAI_COMPAT_API_KEY"
+    client.config["openaiCompatApiKey"] = "sk-from-settings"
+    assert client.openai_compat_api_key == "sk-from-settings" and client.openai_compat_key_source == "config"
+
+
+def test_nvidia_key_alone_defaults_the_base_url_to_nim(no_env_keys):
+    client = _client(base_url="", key="")
+    assert client.openai_compat_name is None
+    no_env_keys.setenv("NVIDIA_API_KEY", ENV_KEY)
+    assert client.openai_compat_base_url == NIM and client.openai_compat_name == PROVIDER
+
+    client.config["openaiCompatBaseUrl"] = "http://localhost:11434/v1"
+    assert client.openai_compat_base_url == "http://localhost:11434/v1"  # a configured URL wins
+    client.config["openaiCompatBaseUrl"] = ""
+
+    # Another key in use: never send it to NVIDIA by default
+    no_env_keys.setenv("OPENAI_COMPAT_API_KEY", "sk-or-openrouter")
+    assert client.openai_compat_base_url == "" and client.openai_compat_name is None
+    no_env_keys.delenv("OPENAI_COMPAT_API_KEY")
+    client.config["openaiCompatApiKey"] = "sk-or-openrouter"
+    assert client.openai_compat_base_url == ""
+
+
+@pytest.mark.anyio
+async def test_nvidia_env_key_and_a_model_are_enough(no_env_keys, caplog):
+    no_env_keys.setenv("NVIDIA_API_KEY", ENV_KEY)
+    client = _client(base_url="", key="")
+    with caplog.at_level(logging.DEBUG):
+        with patch("httpx.AsyncClient.post") as mock_post:
+            mock_post.side_effect = _route(_gemini_busy(), [_chat_err(500, "oops"), _chat_ok("nim")])
+            with pytest.raises(GeminiBusyError) as exc:
+                await client._call_gemini(HELLO)
+            assert await client._call_gemini(HELLO) == "nim"
+    calls = [c for c in mock_post.call_args_list if c.args[0].endswith("/chat/completions")]
+    assert calls[-1].args[0] == f"{NIM}/chat/completions"
+    assert calls[-1].kwargs["headers"]["Authorization"] == f"Bearer {ENV_KEY}"
+    assert ENV_KEY not in caplog.text and ENV_KEY not in str(exc.value)
+
+
+def test_settings_show_an_env_key_masked(api, no_env_keys):
+    client, app_module = api
+    no_env_keys.setenv("NVIDIA_API_KEY", ENV_KEY)
+    app_module.gemini.save_config({"openaiCompatModel": NIM_MODEL})
+    res = client.get("/api/config")
+    cfg = res.json()
+    assert cfg["openaiCompatKeySource"] == "NVIDIA_API_KEY"
+    assert cfg["maskedOpenaiCompatKey"] == "nvapi-...9876" and cfg["hasOpenaiCompatKey"]
+    assert cfg["openaiCompatBaseUrl"] == "" and cfg["openaiCompatEffectiveBaseUrl"] == NIM
+    assert ENV_KEY not in res.text
+
+
+def test_dotenv_file_is_loaded_without_overriding_the_environment(tmp_path, no_env_keys):
+    import config_defaults
+
+    (tmp_path / ".env").write_text(f"NVIDIA_API_KEY={ENV_KEY}\nOPENAI_COMPAT_API_KEY=from-dotenv\n")
+    no_env_keys.setenv("OPENAI_COMPAT_API_KEY", "from-the-shell")
+    no_env_keys.setattr(config_defaults, "APP_DIR", str(tmp_path))
+
+    no_env_keys.setenv("LEECH_DOCTOR_DOTENV", "0")
+    config_defaults.load_dotenv_file()
+    assert "NVIDIA_API_KEY" not in gemini_client.os.environ
+
+    no_env_keys.setenv("LEECH_DOCTOR_DOTENV", "1")
+    config_defaults.load_dotenv_file()
+    assert gemini_client.os.environ["NVIDIA_API_KEY"] == ENV_KEY
+    assert gemini_client.os.environ["OPENAI_COMPAT_API_KEY"] == "from-the-shell"

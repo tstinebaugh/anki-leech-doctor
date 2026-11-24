@@ -790,15 +790,18 @@ def _mask(key: str) -> str:
 async def get_config():
     cfg = gemini.load_config()
     key = cfg.get("apiKey", "")
-    compat_key = cfg.get("openaiCompatApiKey") or ""
     rag_stats = rag.get_stats()
     return {
         "hasKey": bool(key),
         "maskedKey": _mask(key),
         "openaiCompatBaseUrl": cfg.get("openaiCompatBaseUrl") or "",
+        # What is used when the field is empty (NVIDIA NIM when the key is NVIDIA_API_KEY)
+        "openaiCompatEffectiveBaseUrl": gemini.openai_compat_base_url,
         "openaiCompatModel": cfg.get("openaiCompatModel") or "",
-        "hasOpenaiCompatKey": bool(compat_key),
-        "maskedOpenaiCompatKey": _mask(compat_key),
+        "hasOpenaiCompatKey": bool(gemini.openai_compat_api_key),
+        "maskedOpenaiCompatKey": _mask(gemini.openai_compat_api_key),
+        # "config", "OPENAI_COMPAT_API_KEY", "NVIDIA_API_KEY" or None
+        "openaiCompatKeySource": gemini.openai_compat_key_source,
         **{k: cfg.get(k, DEFAULT_CONFIG.get(k)) for k in (
             "model", "persona", "mnemonicTone", "jlptLevel", "kanjiDeckName", "kanjiStrategy",
             "mnemonicStyle", "targetMiningDeck", "leechSearchQuery", "grammarDeckBase",
