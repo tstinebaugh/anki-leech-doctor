@@ -1,7 +1,9 @@
 import json
 import logging
 import os
+import html
 import re
+import unicodedata
 import urllib.error
 import urllib.request
 from typing import Any, Dict, List, Optional
@@ -88,6 +90,46 @@ def grammar_deck_name(level: Optional[str], base: Optional[str] = None) -> str:
 
 def is_grammar_deck(deck_name: Optional[str]) -> bool:
     return bool(deck_name) and "grammar" in deck_name.lower()
+
+
+# Fields that hold a note's word, searched for duplicates before mining. "Kanji" is left
+# out on purpose: it is the kanji-story deck's field and would match every one-kanji word.
+DUPLICATE_SEARCH_FIELDS = ["VocabKanji", "Expression", "Word", "Front"]
+_ALTERNATIVE_SEPARATORS = re.compile(r"[・,、/／;；]")
+_OPTIONAL_PART = re.compile(r"\([^()]*\)")
+
+
+def word_forms(text: str) -> set:
+    """The ways a word field can be read, for exact duplicate matching.
+
+    '省みる・顧みる' -> {省みる, 顧みる}; 'ハード(な)' -> {ハード, ハードな};
+    '〜ばかり' -> {ばかり}; '遺産[1]' and '<div>遺産 </div>' -> {遺産}.
+    """
+    if not text:
+        return set()
+    t = unicodedata.normalize("NFKC", html.unescape(str(text)))
+    t = re.sub(r"<br\s*/?>|</div>|</p>", "・", t, flags=re.I)
+    t = re.sub(r"<[^>]+>", "", t)
+    t = re.sub(r"\[[^\]]*\]", "", t)  # readings and homonym markers: 肉親[にくしん], 遺産[1]
+    t = re.sub(r"[〜~]", "", t)  # grammar patterns: 〜ばかり == ばかり (NFKC already turned ～ into ~)
+    forms = set()
+    for alt in _ALTERNATIVE_SEPARATORS.split(t):
+        alt = re.sub(r"\s+", "", alt)
+        if not alt:
+            continue
+        without = _OPTIONAL_PART.sub("", alt)  # (ボタンが)取れる -> 取れる
+        with_ = alt.replace("(", "").replace(")", "")  # ハード(な) -> ハードな
+        forms.update(f for f in (without, with_) if f)
+    return forms
+
+
+def _search_term(value: str) -> str:
+    """Escapes a value for an Anki search inside double quotes (* and _ are wildcards)."""
+    return re.sub(r'([\\"*_])', r"\\\1", value)
+
+
+def _plain(text: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html.unescape(text or ""))).strip()
 
 
 def _empty_kanji(k: str) -> Dict[str, Any]:
@@ -413,6 +455,64 @@ class AnkiClient:
                 logger.warning(f"Error fetching kanji info for {k}: {e}")
                 kanji_data[k] = _empty_kanji(k)
         return kanji_data
+
+    def find_existing_notes(
+        self, word: str, extra_fields: Optional[List[str]] = None, limit: int = 10, grammar_only: bool = False
+    ) -> List[Dict[str, Any]]:
+        """Notes whose word field is the same word as `word` (see word_forms), so the app
+        can say "already in your deck" before spending any Gemini requests.
+
+        grammar_only limits the search to grammar notes (tagged `grammar` or in a deck
+        named *grammar*), so mining the pattern ばかり isn't blocked by the vocab card ばかり.
+        """
+        wanted = word_forms(word)
+        if not wanted:
+            return []
+        fields = list(dict.fromkeys(DUPLICATE_SEARCH_FIELDS + [f for f in (extra_fields or []) if f]))
+        if grammar_only:
+            # Few enough to compare them all; a "contains" search would miss しか〜ない for しかない
+            query = '(tag:grammar OR "deck:*grammar*")'
+        else:
+            # A wide Anki search ("contains the word"), narrowed to exact matches below
+            query = " OR ".join(f'"{field}:*{_search_term(form)}*"' for field in fields for form in sorted(wanted))
+        note_ids = self.invoke("findNotes", query=query)
+        if not note_ids:
+            return []
+        matches = []
+        for note in self.invoke("notesInfo", notes=note_ids[:2000]):
+            note_fields = {name: f.get("value", "") for name, f in note.get("fields", {}).items()}
+            field = next((f for f in fields if word_forms(note_fields.get(f, "")) & wanted), None)
+            if field:
+                matches.append((note, note_fields, field))
+            if len(matches) >= limit:
+                break
+        if not matches:
+            return []
+
+        card_ids = [c for note, _, _ in matches for c in note.get("cards", [])[:1]]
+        decks = {cid: deck for deck, cids in self.invoke("getDecks", cards=card_ids).items() for cid in cids}
+        suspended = dict(zip(card_ids, self.invoke("areSuspended", cards=card_ids)))
+        result = []
+        for note, note_fields, field in matches:
+            card_id = (note.get("cards") or [0])[0]
+            tags = note.get("tags", [])
+            result.append({
+                "noteId": note["noteId"],
+                "cardId": card_id,
+                "deckName": decks.get(card_id, ""),
+                "modelName": note.get("modelName", ""),
+                "vocabKanji": _plain(note_fields.get(field, "")),
+                "vocabFurigana": _plain(pick_field(note_fields, "vocabFurigana")),
+                "vocabDef": _plain(pick_field(note_fields, "vocabDef"))[:200],
+                "suspended": bool(suspended.get(card_id)),
+                "isLeech": "leech" in [t.lower() for t in tags],
+                "isGrammar": "grammar" in [t.lower() for t in tags],
+            })
+        return result
+
+    def open_in_browser(self, note_id: int) -> None:
+        """Opens Anki's card browser on this note."""
+        self.invoke("guiBrowse", query=f"nid:{int(note_id)}")
 
     def get_model_field_names(self, note_type: str) -> List[str]:
         try:

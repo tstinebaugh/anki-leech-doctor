@@ -10,6 +10,7 @@ import pytest
 
 from anki_client import AnkiClient
 from gemini_client import GeminiClient
+from conftest import REAL_ANKI_CONNECT_URL
 
 pytestmark = pytest.mark.integration
 
@@ -25,7 +26,7 @@ def _real_config() -> dict:
 
 
 def test_get_kanji_details_missing_kanji():
-    anki = AnkiClient()
+    anki = AnkiClient(REAL_ANKI_CONNECT_URL)
     if not anki.is_connected():
         pytest.skip("AnkiConnect is offline")
     deck = _real_config().get("kanjiDeckName")

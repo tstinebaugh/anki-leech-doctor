@@ -8,6 +8,10 @@ os.environ["LEECH_DOCTOR_CONFIG"] = os.path.join(_tmp, "config.json")
 os.environ["LEECH_DOCTOR_RAG_DIR"] = os.path.join(_tmp, "rag")
 os.environ["LEECH_DOCTOR_DB"] = os.path.join(_tmp, "leech_doctor.db")
 os.environ["LEECH_DOCTOR_ALLOWED_HOSTS"] = "127.0.0.1,localhost,testserver"
+# Unit tests must never read or change your real Anki collection: point AnkiConnect at a
+# port nothing listens on. Integration tests (-m integration) pass the real URL explicitly.
+REAL_ANKI_CONNECT_URL = os.environ.get("ANKI_CONNECT_URL", "http://127.0.0.1:8765")
+os.environ["ANKI_CONNECT_URL"] = "http://127.0.0.1:9"
 os.environ.pop("GEMINI_API_KEY", None)
 os.environ.pop("GOOGLE_API_KEY", None)
 

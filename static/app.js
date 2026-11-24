@@ -2507,9 +2507,72 @@ function setMiningCardType(type) {
   updateMiningTargetLabel();
 }
 
+// ---- Duplicate check while mining ------------------------------------------------------
+// /api/mining/analyze first looks for the word or grammar pattern in Anki. If it's already
+// there, it returns those notes instead of calling Gemini; the user can open one in Anki
+// or press "Mine anyway", which repeats the request with allowDuplicate.
+let miningAllowDuplicate = false;
+const MINING_SUBMIT_LABEL = '<span class="sparkle-icon">⚡</span> Lookup & Prepare Card';
+const MINING_ANYWAY_LABEL = '<span class="sparkle-icon">⚡</span> Mine Anyway';
+
+function resetMiningDuplicates() {
+  miningAllowDuplicate = false;
+  const panel = document.getElementById("mining-duplicates");
+  if (panel) {
+    panel.classList.add("hidden");
+    panel.innerHTML = "";
+  }
+  if (el.btnSubmitMining && !el.btnSubmitMining.disabled) el.btnSubmitMining.innerHTML = MINING_SUBMIT_LABEL;
+}
+
+function showMiningDuplicates(result) {
+  const panel = document.getElementById("mining-duplicates");
+  if (!panel) return;
+  const kind = state.miningCardType === "grammar" ? "grammar point" : "word";
+  const items = result.matches.map((m) => {
+    const deck = m.deckName.split("::").slice(-2).join(" › ");
+    const badges = [
+      m.isGrammar ? '<span class="dup-badge">Grammar</span>' : "",
+      m.suspended ? '<span class="dup-badge dup-badge-warn">Suspended</span>' : "",
+      m.isLeech ? '<span class="dup-badge dup-badge-warn">Leech</span>' : "",
+    ].join("");
+    const reading = m.vocabFurigana && m.vocabFurigana !== m.vocabKanji
+      ? `<span class="dup-reading">${parseFuriganaRuby(escapeHtml(m.vocabFurigana))}</span>` : "";
+    return `<li class="dup-item">
+      <div class="dup-main">
+        <div class="dup-word"><span lang="ja">${escapeHtml(m.vocabKanji)}</span>${reading}${badges}</div>
+        ${m.vocabDef ? `<div class="dup-def">${escapeHtml(m.vocabDef)}</div>` : ""}
+        <div class="dup-deck">${escapeHtml(deck)}</div>
+      </div>
+      <button type="button" class="btn-ghost dup-open" data-note-id="${m.noteId}">Open in Anki</button>
+    </li>`;
+  }).join("");
+  panel.innerHTML = `
+    <div class="dup-title">Already in your decks: this ${kind} matches ${result.matches.length === 1 ? "a note" : `${result.matches.length} notes`}. No Gemini requests were used.</div>
+    <ul class="dup-list">${items}</ul>
+    <div class="dup-hint">Change the input to look up something else, or press <strong>Mine Anyway</strong> to make a new card.</div>`;
+  panel.classList.remove("hidden");
+  miningAllowDuplicate = true;
+}
+
+async function openNoteInAnki(noteId) {
+  try {
+    const res = await fetch("/api/anki/browse", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ noteId: Number(noteId) }),
+    });
+    if (!res.ok) throw new Error((await res.json()).detail || "Could not open Anki");
+    showToast("Opened in Anki's browser.", "success");
+  } catch (err) {
+    showToast(err.message, "error");
+  }
+}
+
 function openMiningModal() {
   if (!el.miningModal) return;
   updateMiningTargetLabel();
+  resetMiningDuplicates();
   el.miningModal.classList.remove("hidden");
   setTimeout(() => el.miningInputVocab.focus(), 50);
 }
@@ -2518,6 +2581,7 @@ function closeMiningModal() {
   if (!el.miningModal) return;
   el.miningModal.classList.add("hidden");
   if (el.miningForm) el.miningForm.reset();
+  resetMiningDuplicates();
 }
 
 // Delete Confirmation Modal Functions
@@ -2683,7 +2747,8 @@ async function handleMiningSubmit(e) {
         // Grammar: "auto" lets the AI place the pattern; N5/N4/N3 forces that deck.
         jlptLevel: isGrammar ? selectedGrammarLevel() : state.jlptLevel,
         cardType: state.miningCardType,
-        personas: state.activePersonas
+        personas: state.activePersonas,
+        allowDuplicate: miningAllowDuplicate
       })
     });
 
@@ -2693,6 +2758,10 @@ async function handleMiningSubmit(e) {
     }
 
     const draftCard = await res.json();
+    if (draftCard.duplicate) {
+      showMiningDuplicates(draftCard);
+      return;
+    }
     draftCard.notes = formatNotesHtml(draftCard.notes);
     
     if (draftCard.kanjiDetails) {
@@ -2713,7 +2782,7 @@ async function handleMiningSubmit(e) {
     showToast(err.message || "Failed to analyze vocabulary.", "error");
   } finally {
     el.btnSubmitMining.disabled = false;
-    el.btnSubmitMining.innerHTML = '<span class="sparkle-icon">⚡</span> Lookup & Prepare Card';
+    el.btnSubmitMining.innerHTML = miningAllowDuplicate ? MINING_ANYWAY_LABEL : MINING_SUBMIT_LABEL;
   }
 }
 
@@ -3339,6 +3408,16 @@ function setupEventListeners() {
   }
   if (el.miningForm) {
     el.miningForm.addEventListener("submit", handleMiningSubmit);
+  }
+  // A different word or card type needs a fresh duplicate check
+  if (el.miningInputVocab) el.miningInputVocab.addEventListener("input", resetMiningDuplicates);
+  document.querySelectorAll(".btn-mining-type").forEach((b) => b.addEventListener("click", resetMiningDuplicates));
+  const dupPanel = document.getElementById("mining-duplicates");
+  if (dupPanel) {
+    dupPanel.addEventListener("click", (e) => {
+      const btn = e.target.closest(".dup-open");
+      if (btn) openNoteInAnki(btn.dataset.noteId);
+    });
   }
 
   // Unsuspend Confirmation Modal Events
