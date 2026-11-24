@@ -34,6 +34,9 @@ FALLBACK_MODELS = [
     "gemini-flash-lite-latest",
     "gemini-3.1-flash-lite",
     "gemini-flash-latest",
+    # Often busy, but each has its own quota and a busy reply takes only 1-3s
+    "gemini-3.7-flash",
+    "gemini-3.1-flash-lite-preview",
 ]
 ATTEMPT_TIMEOUT = 25.0     # seconds to wait for one model; healthy replies take 1-10s
 CONNECT_TIMEOUT = 10.0

@@ -28,16 +28,22 @@ from utils import format_notes_for_anki
 logger = logging.getLogger(__name__)
 
 def http_error(e: Exception) -> HTTPException:
-    """Maps an exception to an HTTP error. Gemini being busy is 503 + Retry-After, which the
-    frontend retries with a spinner; running out of quota is a final 429."""
+    """Logs an exception and maps it to an HTTP error. Call it from an `except` block.
+
+    Gemini being busy is 503 + Retry-After, which the frontend retries with a spinner, and
+    running out of quota is a final 429. Both are expected, so they get one log line (the
+    per-model details are already logged by the Gemini client) instead of a traceback."""
     if isinstance(e, GeminiBusyError):
+        logger.warning(f"All Gemini models busy; the app will retry in {e.retry_after}s")
         return HTTPException(
             status_code=503,
             detail="All available Gemini models are busy right now.",
             headers={"Retry-After": str(e.retry_after)},
         )
     if isinstance(e, GeminiQuotaError):
+        logger.warning(f"No Gemini model has quota left: {e}")
         return HTTPException(status_code=429, detail=str(e))
+    logger.exception("Request failed")
     return HTTPException(status_code=500, detail=str(e))
 
 
@@ -268,7 +274,6 @@ async def sync_rag_index(req: Optional[RAGSyncRequest] = None):
         res = await rag.index_cards(cards)
         return res
     except Exception as e:
-        logger.exception("Request failed")
         raise http_error(e)
 
 @app.post("/api/rag/search-similar")
@@ -354,7 +359,6 @@ def gemini_stats(range: str = "week"):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.exception("Request failed")
         raise http_error(e)
 
 
@@ -365,7 +369,6 @@ def gemini_usage():
     try:
         return usage_report(gemini.candidate_models())
     except Exception as e:
-        logger.exception("Request failed")
         raise http_error(e)
 
 
@@ -386,7 +389,6 @@ async def gemini_models():
         await model_catalog.refresh_catalog(gemini.api_key, model_health.db)
         return _catalog_report()
     except Exception as e:
-        logger.exception("Request failed")
         raise http_error(e)
 
 
@@ -444,7 +446,6 @@ async def generate_mnemonic(req: MnemonicRequest):
         )
         return res
     except Exception as e:
-        logger.exception("Request failed")
         raise http_error(e)
 
 @app.post("/api/generate-sentence")
@@ -462,7 +463,6 @@ async def generate_sentence(req: SentenceRequest):
         )
         return res
     except Exception as e:
-        logger.exception("Request failed")
         raise http_error(e)
 
 @app.post("/api/chat")
@@ -582,7 +582,6 @@ def delete_card_endpoint(req: DeleteCardRequest):
                 logger.warning(f"Error removing card {req.cardId} from RAG: {e}")
         return {"success": True, "message": "Card permanently deleted from Anki"}
     except Exception as e:
-        logger.exception("Request failed")
         raise http_error(e)
 
 @app.post("/api/mining/analyze")
@@ -711,7 +710,6 @@ async def analyze_mining_vocab(req: MiningAnalyzeRequest):
         }
         return draft_card
     except Exception as e:
-        logger.exception("Request failed")
         raise http_error(e)
 
 def _ensure_rag_deck(deck_name: str) -> None:
@@ -751,7 +749,6 @@ async def create_mined_card(req: SaveMinedCardRequest):
         # Setup problem the user can fix (note type missing, fields don't match)
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.exception("Adding mined card failed")
         raise http_error(e)
     # Index the new card so the collision radar sees it right away
     try:

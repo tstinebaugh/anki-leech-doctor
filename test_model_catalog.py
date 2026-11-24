@@ -203,3 +203,20 @@ def test_models_endpoints_add_and_remove_fallbacks():
         else:
             open(path, "w").write(saved)
         app_module.gemini.config = app_module.gemini.load_config()
+
+
+def test_models_gemini_answered_404_are_skipped_and_not_offered(database):
+    now = datetime.now(timezone.utc)
+    database.save_catalog([catalog_entry(m) for m in ["gemini-2.5-flash", "gemini-3.7-flash", "gemini-3-flash-preview"]], now)
+    database.record_call(started_at=now - timedelta(hours=2), model="gemini-2.5-flash", outcome="not_found",
+                         http_status=404, latency_ms=400)
+    database.record_call(started_at=now - timedelta(hours=3), model="gemini-3.7-flash", outcome="not_found",
+                         http_status=404, latency_ms=400)
+    database.record_call(started_at=now - timedelta(hours=1), model="gemini-3.7-flash", outcome="ok",
+                         http_status=200, latency_ms=4000)  # back again: its latest call counts
+
+    plan = {e.model: e for e in fallback_plan("gemini-3-flash-preview", ["gemini-2.5-flash", "gemini-3.7-flash"], database)}
+    assert plan["gemini-2.5-flash"].status == "missing" and "404" in plan["gemini-2.5-flash"].note
+    assert plan["gemini-3.7-flash"].status == "try"
+    candidates = catalog_report("gemini-3-flash-preview", [], database)["candidates"]
+    assert [c["model"] for c in candidates] == ["gemini-3.7-flash"]

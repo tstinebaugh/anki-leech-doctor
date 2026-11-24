@@ -11,8 +11,10 @@ Three sources, all kept in the SQLite database (db.py):
 
 fallback_plan() turns these into the order _call_gemini tries models in: the configured
 model first, then the fallbacks by expected time per answer over the last week. Fallbacks
-missing from the model list are skipped, and so is a name that points at the same model as
-one already in the order, since both would share that model's quota and overload.
+missing from the model list, or that Gemini last answered with a 404 (the list still has
+models it no longer serves to new keys, like gemini-2.5-flash), are skipped, and so is a
+name that points at the same model as one already in the order, since both would share
+that model's quota and overload.
 """
 import asyncio
 import logging
@@ -172,8 +174,10 @@ def fallback_plan(configured: str, pool: List[str], db: Optional[Database],
     stats: Dict[str, ModelStats] = {}
     resolves: Dict[str, str] = {}
     present: Optional[set] = None
+    rejected: set = set()
     if db is not None:
         stats = {s.model: s for s in db.model_stats(now - HEALTH_WINDOW)}
+        rejected = db.models_not_found(now - HEALTH_WINDOW)
         resolves = db.resolved_versions(now - HEALTH_WINDOW)
         catalog = db.catalog()
         if catalog:
@@ -184,7 +188,9 @@ def fallback_plan(configured: str, pool: List[str], db: Optional[Database],
         return PlanEntry(model, role, "try", expected_ms(stats.get(model)), resolves.get(model), stats.get(model))
 
     first = entry(configured, "configured")
-    if present is not None and configured not in present:
+    if configured in rejected:
+        first.note = "Gemini answered 404: not available to this key"
+    elif present is not None and configured not in present:
         first.note = "not in Gemini's model list any more"
     fallbacks = sorted(
         (entry(m, "fallback") for m in dict.fromkeys(pool) if m != configured),
@@ -193,7 +199,9 @@ def fallback_plan(configured: str, pool: List[str], db: Optional[Database],
     served = {first.resolves_to or configured}
     for e in fallbacks:
         target = e.resolves_to or e.model
-        if present is not None and e.model not in present:
+        if e.model in rejected:
+            e.status, e.note = "missing", "Gemini answered 404: not available to this key"
+        elif present is not None and e.model not in present:
             e.status, e.note = "missing", "not in Gemini's model list any more"
         elif target in served:
             e.status, e.note = "duplicate", f"points at {target}, which is already tried"
@@ -242,6 +250,7 @@ def catalog_report(configured: str, pool: List[str], db: Optional[Database]) -> 
             "medianMs": st.median_ms if st else None,
         })
     in_use = {configured, *pool}
+    rejected = db.models_not_found(now - HEALTH_WINDOW) if db is not None else set()
     candidates = [
         {
             "model": m.name,
@@ -252,7 +261,7 @@ def catalog_report(configured: str, pool: List[str], db: Optional[Database]) -> 
             "resolvesTo": resolves.get(m.name) if resolves.get(m.name) != m.name else None,
         }
         for m in catalog
-        if is_text_flash(m.name) and m.name not in in_use and fetched and m.last_seen_at >= fetched - timedelta(minutes=1)
+        if is_text_flash(m.name) and m.name not in in_use and m.name not in rejected and fetched and m.last_seen_at >= fetched - timedelta(minutes=1)
     ]
     candidates.sort(key=lambda c: (not c["isNew"], c["model"]))
     return {

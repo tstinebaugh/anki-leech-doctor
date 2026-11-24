@@ -282,6 +282,16 @@ class Database:
         with self.Session() as s:
             return {model: version for model, version in s.execute(query.order_by(GeminiCall.id))}
 
+    def models_not_found(self, since: Optional[datetime] = None) -> set:
+        """Models whose most recent call got a 404: retired, or no longer offered to this
+        key (gemini-2.5-flash is still in the model list but "not available to new users")."""
+        query = select(GeminiCall.model, GeminiCall.outcome)
+        if since:
+            query = query.where(GeminiCall.started_at >= since)
+        with self.Session() as s:
+            latest = {model: outcome for model, outcome in s.execute(query.order_by(GeminiCall.id))}
+        return {model for model, outcome in latest.items() if outcome == "not_found"}
+
     # ---- model catalog -----------------------------------------------------------------
 
     def save_catalog(self, models: List[Dict], seen_at: Optional[datetime] = None) -> None:
