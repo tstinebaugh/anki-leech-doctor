@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
-from sqlalchemy import DateTime, Index, String, Text, TypeDecorator, create_engine, delete, event, select
+from sqlalchemy import DateTime, Index, String, Text, TypeDecorator, case, create_engine, delete, event, func, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
@@ -107,6 +107,29 @@ class ModelUsage:
     daily_limit: Optional[int] = None
 
 
+@dataclass
+class ModelStats:
+    """How one model performed over a time range (see Database.model_stats)."""
+
+    model: str
+    calls: int = 0
+    ok: int = 0
+    overloaded: int = 0     # HTTP 5xx: "high demand"
+    timeouts: int = 0       # no answer within the attempt timeout
+    quota: int = 0          # 429: daily quota used up or rate limited
+    other_failures: int = 0  # empty replies, bad requests, connection errors, ...
+    median_ms: Optional[int] = None  # successful replies only
+    p90_ms: Optional[int] = None
+    fastest_ms: Optional[int] = None
+    ms_lost: int = 0        # time spent waiting on attempts that failed
+    avg_tokens: Optional[int] = None
+    last_used: Optional[datetime] = None
+
+    @property
+    def success_rate(self) -> Optional[float]:
+        return self.ok / self.calls if self.calls else None
+
+
 class Database:
     def __init__(self, url: str):
         self.url = url
@@ -167,6 +190,63 @@ class Database:
             by_model[model].median_ms = int(statistics.median(values))
         return list(by_model.values())
 
+    def model_stats(self, since: Optional[datetime] = None) -> List[ModelStats]:
+        """Per-model counts by outcome and latency percentiles since `since` (all time if None).
+
+        Counts are aggregated in SQL; percentiles are computed in Python because SQLite
+        has no percentile function."""
+        c = GeminiCall
+        window = [c.started_at >= since] if since else []
+
+        def count(condition):
+            return func.sum(case((condition, 1), else_=0))
+
+        tokens = func.coalesce(c.prompt_tokens, 0) + func.coalesce(c.output_tokens, 0) + func.coalesce(c.thought_tokens, 0)
+        totals = (
+            select(
+                c.model,
+                func.count(),
+                count(c.outcome == "ok"),
+                count(c.outcome == "overloaded"),
+                count(c.outcome == "timeout"),
+                count(c.outcome.in_(("quota", "rate_limited"))),
+                func.sum(case((c.outcome != "ok", c.latency_ms), else_=0)),
+                func.avg(case((c.outcome == "ok", tokens))),
+                func.max(c.started_at),
+            )
+            .where(*window)
+            .group_by(c.model)
+        )
+        latencies = select(c.model, c.latency_ms).where(c.outcome == "ok", *window)
+        with self.Session() as s:
+            rows = s.execute(totals).all()
+            by_model: Dict[str, List[int]] = {}
+            for model, ms in s.execute(latencies):
+                by_model.setdefault(model, []).append(ms)
+
+        stats = []
+        for model, calls, ok, overloaded, timeouts, quota, ms_lost, avg_tokens, last_used in rows:
+            ms = sorted(by_model.get(model, []))
+            stats.append(ModelStats(
+                model=model, calls=calls, ok=ok, overloaded=overloaded, timeouts=timeouts, quota=quota,
+                other_failures=calls - ok - overloaded - timeouts - quota,
+                median_ms=int(statistics.median(ms)) if ms else None,
+                p90_ms=_percentile(ms, 0.9),
+                fastest_ms=ms[0] if ms else None,
+                ms_lost=int(ms_lost or 0),
+                avg_tokens=int(avg_tokens) if avg_tokens is not None else None,
+                # SQLite's max() returns the stored text, not a datetime
+                last_used=_parse_utc(last_used),
+            ))
+        return stats
+
+    def recent_failures(self, since: Optional[datetime] = None, limit: int = 15) -> List[GeminiCall]:
+        query = select(GeminiCall).where(GeminiCall.outcome != "ok")
+        if since:
+            query = query.where(GeminiCall.started_at >= since)
+        with self.Session() as s:
+            return list(s.execute(query.order_by(GeminiCall.id.desc()).limit(limit)).scalars())
+
     def recent_calls(self, limit: int = 20) -> List[GeminiCall]:
         with self.Session() as s:
             return list(s.execute(select(GeminiCall).order_by(GeminiCall.id.desc()).limit(limit)).scalars())
@@ -200,6 +280,22 @@ class Database:
         with self.Session.begin() as s:
             for table in (GeminiCall, ModelCooldown, ModelQuota):
                 s.execute(delete(table))
+
+
+def _percentile(sorted_values: List[int], q: float) -> Optional[int]:
+    """Nearest-rank percentile of an already sorted list."""
+    if not sorted_values:
+        return None
+    rank = max(0, min(len(sorted_values) - 1, int(round(q * len(sorted_values) + 0.5)) - 1))
+    return sorted_values[rank]
+
+
+def _parse_utc(value) -> Optional[datetime]:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = datetime.fromisoformat(value)
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
 
 
 def _sqlite_pragmas(dbapi_connection, _record) -> None:

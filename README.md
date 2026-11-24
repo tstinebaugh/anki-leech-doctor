@@ -153,6 +153,8 @@ flowchart TD
 
 The database is created and migrated automatically on startup. **Settings → Gemini Usage Today** shows what it knows: requests per model since the daily quota reset, median latency, learned limits and cooldowns.
 
+**Settings → Debug: Gemini Performance** ranks the models by speed over the last 24 hours, 7 days, 30 days or all time: median and p90 latency of successful replies, success rate, overloads, timeouts and quota errors, how long failed attempts kept you waiting, and the most recent failures. The quickest model that answers at least 80% of the time is marked *Fastest reliable* (`GET /api/gemini/stats?range=day|week|month|all`).
+
 Design decisions, with measurements, are recorded in [`docs/design/`](docs/design/).
 
 ---

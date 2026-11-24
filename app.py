@@ -20,7 +20,7 @@ from pydantic import BaseModel
 
 from anki_client import AnkiClient, JLPT_LEVELS, grammar_deck_name, normalize_jlpt_level
 from config_defaults import DEFAULT_CONFIG
-from gemini_client import FALLBACK_MODELS, GeminiBusyError, GeminiClient, GeminiQuotaError, usage_report
+from gemini_client import FALLBACK_MODELS, GeminiBusyError, GeminiClient, GeminiQuotaError, performance_report, usage_report
 from rag_engine import MultiVectorRAG
 from utils import format_notes_for_anki
 
@@ -341,6 +341,19 @@ def browse_note(req: BrowseNoteRequest):
         anki.open_in_browser(req.noteId)
         return {"success": True}
     except Exception as e:
+        raise http_error(e)
+
+
+@app.get("/api/gemini/stats")
+def gemini_stats(range: str = "week"):
+    """Speed and reliability per model over the last day, week, month or all time,
+    from the call log (for the debug dashboard in Settings)."""
+    try:
+        return performance_report(range)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.exception("Request failed")
         raise http_error(e)
 
 
