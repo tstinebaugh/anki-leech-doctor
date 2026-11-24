@@ -12,6 +12,7 @@ from config_defaults import (
     DEFAULT_MINING_DECK,
     DEFAULT_NOTE_TYPE,
 )
+from furigana import normalize_furigana
 from utils import format_notes_for_anki
 
 logger = logging.getLogger(__name__)
@@ -20,6 +21,8 @@ ANKI_CONNECT_URL = os.environ.get("ANKI_CONNECT_URL", "http://127.0.0.1:8765")
 KANJI_REGEX = re.compile(r"[一-龯]")
 JLPT_LEVELS = ("N5", "N4", "N3", "N2", "N1")
 REVIEWED_TAG = "ai-mnemonic-reviewed"
+# Fields in Anki bracket-furigana format, cleaned up before they are written
+FURIGANA_ROLES = ("vocabFurigana", "sentFurigana")
 
 # Field names tried, in order, for each role when reading or writing a note.
 # Covers the "Japanese sentences" note type plus common Core / Kaishi / Basic names.
@@ -453,10 +456,10 @@ class AnkiClient:
         formatted_notes = format_notes_for_anki(notes.strip()) if notes else ""
         values = {
             "vocabKanji": vocab_kanji.strip(),
-            "vocabFurigana": vocab_furigana.strip(),
+            "vocabFurigana": normalize_furigana(vocab_furigana),
             "vocabDef": vocab_def.strip(),
             "sentKanji": sent_kanji.strip(),
-            "sentFurigana": sent_furigana.strip(),
+            "sentFurigana": normalize_furigana(sent_furigana),
             "sentEng": sent_eng.strip(),
             "notes": formatted_notes,
             "pitchPattern": (pitch_pattern or "").strip(),
@@ -519,8 +522,13 @@ class AnkiClient:
         to_update: Dict[str, str] = {}
         for role, value in values.items():
             name = resolve_field(model_fields, role)
-            if name:
-                to_update[name] = format_notes_for_anki(value) if role == "notes" and value else value
+            if not name:
+                continue
+            if role == "notes" and value:
+                value = format_notes_for_anki(value)
+            elif role in FURIGANA_ROLES:
+                value = normalize_furigana(value)
+            to_update[name] = value
         if not to_update:
             raise ValueError(
                 f"This card's note type has none of the fields to update ({', '.join(values)}). "

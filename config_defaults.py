@@ -10,6 +10,8 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 # Paths (overridable with env vars, e.g. for tests or running several profiles)
 CONFIG_PATH = os.environ.get("LEECH_DOCTOR_CONFIG", os.path.join(APP_DIR, "config.json"))
 RAG_STORAGE_PATH = os.environ.get("LEECH_DOCTOR_RAG_DIR", os.path.join(APP_DIR, ".rag_storage"))
+# SQLite database: Gemini call log, model cooldowns and learned quotas (see db.py)
+DB_PATH = os.environ.get("LEECH_DOCTOR_DB", os.path.join(APP_DIR, "leech_doctor.db"))
 
 DEFAULT_MODEL = "gemini-flash-latest"  # Google's alias for the current Flash model
 

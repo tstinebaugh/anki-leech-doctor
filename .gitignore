@@ -21,6 +21,11 @@ Thumbs.db
 # Local vector database storage
 .rag_storage/
 
+# Local SQLite database (Gemini call log, cooldowns, quotas)
+leech_doctor.db
+leech_doctor.db-*
+.model_health.json
+
 # Virtual environments
 .venv/
 venv/

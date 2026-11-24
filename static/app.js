@@ -309,6 +309,129 @@ function showToast(message, type = "info", action = null) {
   }, timeoutMs);
 }
 
+// ---- Retrying while Gemini is busy ----------------------------------------------------
+// The server answers 503 + Retry-After when every Gemini model it can use is overloaded
+// or timed out (models out of quota are skipped until their reset). Instead of failing,
+// keep retrying with a spinner and a Cancel button, waiting a little longer each time.
+const GEMINI_RETRY_MAX_MS = 5 * 60 * 1000;
+const GEMINI_TASK_LABELS = {
+  "/api/mining/analyze": "the card analysis",
+  "/api/generate-mnemonic": "the mnemonic",
+  "/api/generate-sentence": "the sentence",
+  "/api/chat": "the tutor reply",
+};
+
+function showGeminiRetryToast(task) {
+  const container = document.getElementById("toast-container");
+  const toast = document.createElement("div");
+  toast.className = "toast toast-retry";
+  toast.setAttribute("role", "status");
+  toast.innerHTML = '<span class="retry-spinner" aria-hidden="true"></span><span class="retry-text"></span>';
+  const cancelBtn = document.createElement("button");
+  cancelBtn.className = "toast-action-btn";
+  cancelBtn.textContent = "Cancel";
+  toast.appendChild(cancelBtn);
+  container.appendChild(toast);
+  const text = toast.querySelector(".retry-text");
+  let cancel = null;
+  cancelBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (cancel) cancel();
+  });
+
+  return {
+    // Counts down, then resolves false; resolves true if the user cancels
+    wait(seconds, attempt) {
+      return new Promise((resolve) => {
+        let left = seconds;
+        const render = () => {
+          text.textContent = `All Gemini models are busy. Retrying ${task} in ${left}s (attempt ${attempt + 1})…`;
+        };
+        render();
+        const timer = setInterval(() => {
+          left -= 1;
+          if (left <= 0) {
+            clearInterval(timer);
+            text.textContent = `Retrying ${task} (attempt ${attempt + 1})…`;
+            resolve(false);
+          } else {
+            render();
+          }
+        }, 1000);
+        cancel = () => {
+          clearInterval(timer);
+          resolve(true);
+        };
+      });
+    },
+    retrying(attempt) {
+      text.textContent = `Retrying ${task} (attempt ${attempt})…`;
+      cancel = null;
+    },
+    close() {
+      toast.style.opacity = "0";
+      setTimeout(() => toast.remove(), 200);
+    },
+  };
+}
+
+async function fetchGemini(url, options) {
+  const task = GEMINI_TASK_LABELS[url] || "the request";
+  const started = Date.now();
+  let toast = null;
+  try {
+    for (let attempt = 1; ; attempt++) {
+      if (toast) toast.retrying(attempt);
+      const res = await fetch(url, options);
+      if (res.status !== 503 || Date.now() - started > GEMINI_RETRY_MAX_MS) return res;
+      // 5s, 10s, 20s, then every 30s
+      const base = Math.max(3, Number(res.headers.get("Retry-After")) || 5);
+      const delay = Math.min(30, base * 2 ** (attempt - 1));
+      toast = toast || showGeminiRetryToast(task);
+      if (await toast.wait(delay, attempt)) {
+        throw new Error(`Stopped waiting for ${task}: Gemini was still busy.`);
+      }
+    }
+  } finally {
+    if (toast) toast.close();
+  }
+}
+
+// ---- Gemini usage (Settings) -----------------------------------------------------------
+async function loadGeminiUsage() {
+  const wrap = document.getElementById("gemini-usage");
+  if (!wrap) return;
+  try {
+    const res = await fetch("/api/gemini/usage");
+    if (!res.ok) throw new Error((await res.json()).detail || "Could not load usage");
+    const data = await res.json();
+    const rows = data.models.map((m) => {
+      const used = m.dailyLimit ? `${m.answered} / ${m.dailyLimit}` : `${m.answered}`;
+      const pct = m.dailyLimit ? Math.min(100, Math.round((m.answered / m.dailyLimit) * 100)) : 0;
+      const bar = m.dailyLimit
+        ? `<div class="usage-bar" aria-hidden="true"><span style="width:${pct}%"></span></div>`
+        : "";
+      const status = m.status === "ok"
+        ? '<span class="usage-status usage-ok">Available</span>'
+        : `<span class="usage-status usage-${m.status}" title="${escapeHtml(m.statusDetail)}">${m.status === "blocked" ? "Out of quota" : "Cooling down"}</span>`;
+      return `<tr>
+        <td><code>${escapeHtml(m.model)}</code></td>
+        <td class="num">${used}${bar}</td>
+        <td class="num">${m.failed}</td>
+        <td class="num">${m.medianMs != null ? (m.medianMs / 1000).toFixed(1) + "s" : "–"}</td>
+        <td>${status}${m.statusDetail ? `<div class="usage-detail">${escapeHtml(m.statusDetail)}</div>` : ""}</td>
+      </tr>`;
+    }).join("");
+    wrap.innerHTML = `<table class="usage-table">
+      <thead><tr><th>Model</th><th class="num">Answered</th><th class="num">Failed</th><th class="num">Median</th><th>Status</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <small class="form-help">Quota resets ${escapeHtml(data.resetsIn.replace(/^until /, "at "))}.</small>`;
+  } catch (err) {
+    wrap.innerHTML = `<p class="form-help">Usage unavailable: ${escapeHtml(err.message)}</p>`;
+  }
+}
+
 // Convert bracket furigana syntax (e.g. 来週[らいしゅう]の 社員[しゃいん]) to HTML Ruby
 function parseFuriganaRuby(text) {
   if (!text) return "";
@@ -1511,7 +1634,7 @@ async function generateMnemonic() {
       cardType: getCardType(card)
     };
 
-    const res = await fetch("/api/generate-mnemonic", {
+    const res = await fetchGemini("/api/generate-mnemonic", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload)
@@ -1771,7 +1894,7 @@ async function generatePersonalizedSentence() {
       cardType: getCardType(card)
     };
 
-    const res = await fetch("/api/generate-sentence", {
+    const res = await fetchGemini("/api/generate-sentence", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload)
@@ -2221,7 +2344,7 @@ async function sendChatMessage(customMsg = null) {
 
   try {
     const kanjiDetails = state.kanjiDetailsCache[cardId] || {};
-    const res = await fetch("/api/chat", {
+    const res = await fetchGemini("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -2551,7 +2674,7 @@ async function handleMiningSubmit(e) {
     : '<span class="sparkle-icon">⏳</span> Analyzing & Writing Persona Sentence...';
 
   try {
-    const res = await fetch("/api/mining/analyze", {
+    const res = await fetchGemini("/api/mining/analyze", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -3252,6 +3375,7 @@ function setupEventListeners() {
   // Settings modal
   el.btnOpenSettings.addEventListener("click", () => {
     el.settingsModal.classList.remove("hidden");
+    loadGeminiUsage();
   });
   el.btnCloseSettings.addEventListener("click", () => {
     el.settingsModal.classList.add("hidden");

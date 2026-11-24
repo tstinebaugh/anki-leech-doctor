@@ -107,6 +107,7 @@ flowchart TD
         App["app.py (REST API)"]
         AnkiClient["anki_client.py (Anki RPC)"]
         GeminiClient["gemini_client.py (AI Engine)"]
+        CallLog[("db.py: SQLite via SQLAlchemy<br/>call log, cooldowns, quotas")]
         
         subgraph RAGEngine["🧠 Local Multi-Vector RAG"]
             RAG["rag_engine.py + vector_store.py (numpy)"]
@@ -135,11 +136,23 @@ flowchart TD
     RAG <--> IDSEngine
     IDSEngine <--> IDSDataset
     GeminiClient <--> GeminiAPI
+    GeminiClient <--> CallLog
     App <--> UI
     UI <--> CollisionRadar
 ```
 
-Design decisions, with measurements, are recorded in [`docs/design/`](docs/design/). For example, [0001: Replace ChromaDB with a plain numpy vector index](docs/design/0001-numpy-vector-index.md).
+### Local data
+
+| What | Where | How |
+| :--- | :--- | :--- |
+| Your cards | Anki | Read and written only through AnkiConnect |
+| Settings | `config.json` | JSON |
+| Collision Radar index | `.rag_storage/vectors.npz` | numpy, replaced atomically on each sync ([0001](docs/design/0001-numpy-vector-index.md)) |
+| Gemini call log, model cooldowns, learned daily limits | `leech_doctor.db` | SQLite via SQLAlchemy 2.0, schema managed by Alembic ([0002](docs/design/0002-gemini-call-log.md)) |
+
+The database is created and migrated automatically on startup. **Settings → Gemini Usage Today** shows what it knows: requests per model since the daily quota reset, median latency, learned limits and cooldowns.
+
+Design decisions, with measurements, are recorded in [`docs/design/`](docs/design/).
 
 ---
 
@@ -261,6 +274,7 @@ All settings are stored locally in `config.json` (git-ignored). Only the keys yo
 | `ANKI_CONNECT_URL` | `http://127.0.0.1:8765` | Where AnkiConnect listens. |
 | `LEECH_DOCTOR_CONFIG` | `./config.json` | Config file path. |
 | `LEECH_DOCTOR_RAG_DIR` | `./.rag_storage` | Collision Radar index location. |
+| `LEECH_DOCTOR_DB` | `./leech_doctor.db` | SQLite database: Gemini call log, cooldowns, learned quotas. |
 | `LEECH_DOCTOR_ALLOWED_HOSTS` | `127.0.0.1,localhost` | Host names the server answers to. Add your machine's LAN name/IP if you open the app from another device (and start uvicorn with `--host 0.0.0.0`). |
 
 ---
@@ -271,7 +285,7 @@ All settings are stored locally in `config.json` (git-ignored). Only the keys yo
 - **"Note type … was not found in Anki"** when adding a mined card: set **Mining Note Type** in Settings to a note type you have, or install the *Ankidrone Essentials* deck for `Japanese sentences`.
 - **"All Review Cards" is empty or shows the wrong cards**: check **"All Review Cards" Scope** in Settings. Leave it empty to use your whole collection.
 - **Slow or timed-out Gemini calls, or "high demand" (HTTP 503)**: Google's popular Flash models are often overloaded. The app waits at most 25s per model, then falls back to `gemini-3-flash-preview` and `gemini-flash-lite-latest`, and skips a model that just failed for 1 to 10 minutes. If it keeps happening, choose `gemini-3-flash-preview` as the model in Settings.
-- **Gemini errors mentioning quota (HTTP 429)**: the free tier's daily limit is used up. Wait for the reset, or pick another model in Settings.
+- **Gemini errors mentioning quota (HTTP 429)**: that model's free-tier limit is used up. The app stops asking it until the time Google says the quota resets (midnight Pacific for daily limits) and uses the fallback models meanwhile. It remembers this across restarts in `leech_doctor.db`. To try again sooner, e.g. after upgrading your plan, delete the cooldowns: `sqlite3 leech_doctor.db 'DELETE FROM model_cooldowns'`.
 - **"Invalid host header"**: you opened the app under a host name that isn't allowed. Use `http://127.0.0.1:8766` or set `LEECH_DOCTOR_ALLOWED_HOSTS`.
 
 ---
