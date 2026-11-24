@@ -20,7 +20,8 @@ from pydantic import BaseModel
 
 from anki_client import AnkiClient, JLPT_LEVELS, grammar_deck_name, normalize_jlpt_level
 from config_defaults import DEFAULT_CONFIG
-from gemini_client import FALLBACK_MODELS, GeminiBusyError, GeminiClient, GeminiQuotaError, performance_report, usage_report
+import model_catalog
+from gemini_client import GeminiBusyError, GeminiClient, GeminiQuotaError, model_health, performance_report, usage_report
 from rag_engine import MultiVectorRAG
 from utils import format_notes_for_anki
 
@@ -362,11 +363,56 @@ def gemini_usage():
     """Today's Gemini requests per model (quota day = since midnight Pacific), from the
     call log, with each model's learned daily limit and current cooldown."""
     try:
-        models = [gemini.model] + [m for m in FALLBACK_MODELS if m != gemini.model]
-        return usage_report(models)
+        return usage_report(gemini.candidate_models())
     except Exception as e:
         logger.exception("Request failed")
         raise http_error(e)
+
+
+class FallbackToggleRequest(BaseModel):
+    model: str
+    include: bool
+
+
+def _catalog_report() -> Dict[str, Any]:
+    return model_catalog.catalog_report(gemini.model, gemini.fallback_models, model_health.db)
+
+
+@app.get("/api/gemini/models")
+async def gemini_models():
+    """Gemini's model list (fetched again when over a week old), where each alias points,
+    and the order fallback models are tried in, for the debug section in Settings."""
+    try:
+        await model_catalog.refresh_catalog(gemini.api_key, model_health.db)
+        return _catalog_report()
+    except Exception as e:
+        logger.exception("Request failed")
+        raise http_error(e)
+
+
+@app.post("/api/gemini/models/refresh")
+async def gemini_models_refresh():
+    """Fetches Gemini's model list now instead of waiting for the weekly refresh."""
+    if not gemini.api_key:
+        raise HTTPException(status_code=400, detail="Set a Gemini API key first.")
+    if not await model_catalog.refresh_catalog(gemini.api_key, model_health.db, force=True):
+        raise HTTPException(status_code=502, detail="Could not fetch the model list from Gemini; see the server log.")
+    return _catalog_report()
+
+
+@app.post("/api/gemini/fallbacks")
+def gemini_fallbacks(req: FallbackToggleRequest):
+    """Adds a model to, or removes it from, the fallback list (config key fallbackModels)."""
+    model = req.model.strip()
+    if not re.fullmatch(r"[\w.-]{1,100}", model):
+        raise HTTPException(status_code=400, detail="Not a valid model name.")
+    models = [m for m in gemini.fallback_models if m != model]
+    if req.include:
+        models.append(model)
+    if not models:
+        raise HTTPException(status_code=400, detail="Keep at least one fallback model.")
+    gemini.save_config({"fallbackModels": models})
+    return _catalog_report()
 
 
 @app.post("/api/generate-mnemonic")

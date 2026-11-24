@@ -11,6 +11,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 logger = logging.getLogger(__name__)
 
 from config_defaults import CONFIG_PATH as DEFAULT_CONFIG_PATH, DEFAULT_CONFIG
+import model_catalog
 from db import Database, get_database
 from furigana import clean_sentence_pair, kanji_without_reading, normalize_furigana
 
@@ -21,10 +22,12 @@ GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
 # then answer 503. Each attempt therefore gets a short timeout, a call has a total time
 # budget, and a model that just failed is skipped for a while (see ModelHealth).
 
-# Tried in this order after the configured model. The preview and lite models were the
-# ones still answering in 1-3s while the stable Flash models were overloaded.
-# Each model has its own free-tier quota (20 requests a day for the Flash models), so a few
-# extra fallbacks also mean more free requests per day.
+# Models tried after the configured one (Settings can change the list: config key
+# fallbackModels). The order here only counts until there is history: model_catalog.py
+# re-orders them by how quickly each actually answered over the last week, and skips names
+# that point at a model already tried (gemini-flash-latest is an alias that moves to the
+# newest, busiest Flash). Each model has its own free-tier quota (about 20 requests a day),
+# so a few extra fallbacks also mean more free requests per day.
 FALLBACK_MODELS = [
     "gemini-3-flash-preview",
     "gemini-3.6-flash",
@@ -255,16 +258,23 @@ def _extract_text(data: Dict[str, Any]) -> Tuple[str, str]:
     return "", "Empty text parts returned"
 
 
-def _parse_error(resp: httpx.Response) -> Tuple[str, Optional[float], bool, Optional[int]]:
+def _served_by(data: Dict[str, Any]) -> Optional[str]:
+    """The model that actually answered (an alias such as gemini-flash-latest names its target)."""
+    version = data.get("modelVersion")
+    return str(version).removeprefix("models/")[:100] if version else None
+
+
+def _parse_error(resp: httpx.Response) -> Tuple[str, Optional[float], bool, Optional[int], Optional[str]]:
     """(message, seconds until Google says to retry, whether a daily quota ran out,
-    that quota's daily limit)."""
+    that quota's daily limit, the model the quota belongs to)."""
     try:
         err = resp.json().get("error", {})
     except Exception:
-        return resp.text, None, False, None
+        return resp.text, None, False, None, None
     retry_after = None
     daily = False
     limit = None
+    quota_model = None
     for detail in err.get("details", []) or []:
         delay = str(detail.get("retryDelay", ""))
         if delay.endswith("s"):
@@ -273,6 +283,7 @@ def _parse_error(resp: httpx.Response) -> Tuple[str, Optional[float], bool, Opti
             except ValueError:
                 pass
         for violation in detail.get("violations", []) or []:
+            quota_model = (violation.get("quotaDimensions") or {}).get("model") or quota_model
             quota = f"{violation.get('quotaId', '')} {violation.get('description', '')}".lower()
             if "perday" in quota or "per day" in quota:
                 daily = True
@@ -280,7 +291,12 @@ def _parse_error(resp: httpx.Response) -> Tuple[str, Optional[float], bool, Opti
                     limit = int(violation.get("quotaValue"))
                 except (TypeError, ValueError):
                     pass
-    return err.get("message", resp.text), retry_after, daily, limit
+    message = err.get("message", resp.text)
+    if not quota_model:
+        # The model also appears in the message: "... limit: 20, model: gemini-3.8-flash"
+        m = re.search(r"\bmodel: ([\w.-]+)", message or "")
+        quota_model = m.group(1) if m else None
+    return message, retry_after, daily, limit, quota_model
 
 
 KANJI_CHARS = r"\u4e00-\u9faf々〆ヶ"
@@ -570,6 +586,19 @@ class GeminiClient:
         return self.config.get("model", DEFAULT_CONFIG["model"])
 
     @property
+    def fallback_models(self) -> List[str]:
+        configured = self.config.get("fallbackModels")
+        return list(configured) if isinstance(configured, list) and configured else list(FALLBACK_MODELS)
+
+    def candidate_models(self) -> List[str]:
+        """The configured model, then the fallbacks in the order to try them."""
+        try:
+            return model_catalog.try_order(self.model, self.fallback_models, model_health.db)
+        except Exception as e:
+            logger.warning(f"Could not rank the fallback models, using the configured order: {e}")
+            return [self.model] + [m for m in self.fallback_models if m != self.model]
+
+    @property
     def persona(self) -> str:
         return self.config.get("persona", DEFAULT_CONFIG["persona"])
 
@@ -659,7 +688,8 @@ class GeminiClient:
         if not self.api_key:
             raise ValueError("Gemini API key is not configured. Please set your API key in the UI settings or config.json.")
 
-        candidates_in_order = [self.model] + [m for m in FALLBACK_MODELS if m != self.model]
+        model_catalog.schedule_refresh(self.api_key, model_health.db)
+        candidates_in_order = self.candidate_models()
         models_to_try, blocked = model_health.order(candidates_in_order, demote=_models_at_daily_limit(candidates_in_order))
         level = self.config.get("thinkingLevel") or DEFAULT_CONFIG["thinkingLevel"]
         deadline = time.monotonic() + TOTAL_TIME_BUDGET
@@ -735,7 +765,8 @@ class GeminiClient:
             if resp.status_code == 200:
                 data = resp.json()
                 text, problem = _extract_text(data)
-                log("ok" if text else "empty", http_status=200, error=problem or None, **_token_usage(data))
+                log("ok" if text else "empty", http_status=200, error=problem or None,
+                    model_version=_served_by(data), **_token_usage(data))
                 if text:
                     model_health.succeeded(model_name)
                     if model_name != self.model:
@@ -744,10 +775,11 @@ class GeminiClient:
                 errors_by_model[model_name] = problem
                 continue
 
-            error_detail, retry_after, daily_quota, daily_limit = _parse_error(resp)
+            error_detail, retry_after, daily_quota, daily_limit, quota_model = _parse_error(resp)
             err_msg = f"HTTP {resp.status_code}: {error_detail}"
             errors_by_model[model_name] = err_msg
-            log(_outcome_for(resp.status_code, daily_quota), http_status=resp.status_code, error=error_detail)
+            log(_outcome_for(resp.status_code, daily_quota), http_status=resp.status_code, error=error_detail,
+                model_version=quota_model[:100] if quota_model else None)
             if daily_limit:
                 _remember_daily_limit(model_name, daily_limit)
             if resp.status_code in (401, 403):

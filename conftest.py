@@ -12,6 +12,8 @@ os.environ["LEECH_DOCTOR_ALLOWED_HOSTS"] = "127.0.0.1,localhost,testserver"
 # port nothing listens on. Integration tests (-m integration) pass the real URL explicitly.
 REAL_ANKI_CONNECT_URL = os.environ.get("ANKI_CONNECT_URL", "http://127.0.0.1:8765")
 os.environ["ANKI_CONNECT_URL"] = "http://127.0.0.1:9"
+# Never fetch Gemini's model list in the background during tests
+os.environ["LEECH_DOCTOR_MODEL_REFRESH"] = "0"
 os.environ.pop("GEMINI_API_KEY", None)
 os.environ.pop("GOOGLE_API_KEY", None)
 

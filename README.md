@@ -149,11 +149,13 @@ flowchart TD
 | Your cards | Anki | Read and written only through AnkiConnect |
 | Settings | `config.json` | JSON |
 | Collision Radar index | `.rag_storage/vectors.npz` | numpy, replaced atomically on each sync ([0001](docs/design/0001-numpy-vector-index.md)) |
-| Gemini call log, model cooldowns, learned daily limits | `leech_doctor.db` | SQLite via SQLAlchemy 2.0, schema managed by Alembic ([0002](docs/design/0002-gemini-call-log.md)) |
+| Gemini call log, model cooldowns, learned daily limits, Gemini's model list | `leech_doctor.db` | SQLite via SQLAlchemy 2.0, schema managed by Alembic ([0002](docs/design/0002-gemini-call-log.md), [0003](docs/design/0003-model-catalog.md)) |
 
 The database is created and migrated automatically on startup. **Settings → Gemini Usage Today** shows what it knows: requests per model since the daily quota reset, median latency, learned limits and cooldowns.
 
 **Settings → Debug: Gemini Performance** ranks the models by speed over the last 24 hours, 7 days, 30 days or all time: median and p90 latency of successful replies, success rate, overloads, timeouts and quota errors, how long failed attempts kept you waiting, and the most recent failures. The quickest model that answers at least 80% of the time is marked *Fastest reliable* (`GET /api/gemini/stats?range=day|week|month|all`).
+
+**Settings → Debug: Gemini Models & Fallback Order** shows the order models are tried in when yours is busy. Fallbacks are ranked by the average time per answer over the last 7 days, counting time lost to failed attempts, and a name that points at a model already in the order is skipped: `gemini-flash-latest` is an alias that moves to the newest Flash, which is usually the busiest. Gemini's model list is fetched again once a week (or with *Refresh now*), so removed models drop out and new text Flash models are listed with an *Add* button (`GET /api/gemini/models`).
 
 Design decisions, with measurements, are recorded in [`docs/design/`](docs/design/).
 
@@ -287,7 +289,7 @@ All settings are stored locally in `config.json` (git-ignored). Only the keys yo
 - **"Could not connect to AnkiConnect"**: Anki must be open with AnkiConnect installed. Restart Anki after installing the add-on.
 - **"Note type … was not found in Anki"** when adding a mined card: set **Mining Note Type** in Settings to a note type you have, or install the *Ankidrone Essentials* deck for `Japanese sentences`.
 - **"All Review Cards" is empty or shows the wrong cards**: check **"All Review Cards" Scope** in Settings. Leave it empty to use your whole collection.
-- **Slow or timed-out Gemini calls, or "high demand" (HTTP 503)**: Google's popular Flash models are often overloaded. The app waits at most 25s per model, then falls back to `gemini-3-flash-preview` and `gemini-flash-lite-latest`, and skips a model that just failed for 1 to 10 minutes. If it keeps happening, choose `gemini-3-flash-preview` as the model in Settings.
+- **Slow or timed-out Gemini calls, or "high demand" (HTTP 503)**: Google's popular Flash models are often overloaded. The app waits at most 25s per model, then falls back to the models that have answered quickest over the last week, and skips a model that just failed for 1 to 10 minutes. If it keeps happening, check **Settings → Debug: Gemini Models & Fallback Order** and pick the model at the top as yours.
 - **Gemini errors mentioning quota (HTTP 429)**: that model's free-tier limit is used up. The app stops asking it until the time Google says the quota resets (midnight Pacific for daily limits) and uses the fallback models meanwhile. It remembers this across restarts in `leech_doctor.db`. To try again sooner, e.g. after upgrading your plan, delete the cooldowns: `sqlite3 leech_doctor.db 'DELETE FROM model_cooldowns'`.
 - **"Invalid host header"**: you opened the app under a host name that isn't allowed. Use `http://127.0.0.1:8766` or set `LEECH_DOCTOR_ALLOWED_HOSTS`.
 
