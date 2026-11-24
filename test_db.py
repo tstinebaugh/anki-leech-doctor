@@ -155,3 +155,59 @@ def test_legacy_cooldown_file_is_imported_once(database, tmp_path):
     _import_legacy_cooldowns(database, str(legacy))
     assert [c.model for c in database.active_cooldowns()] == ["gemini-flash-latest"]
     assert not legacy.exists()
+
+
+def _seed(database, rows, now=None):
+    """rows: (model, outcome, latency_ms, hours_ago)"""
+    now = now or datetime.now(timezone.utc)
+    for model, outcome, ms, hours_ago in rows:
+        database.record_call(
+            started_at=now - timedelta(hours=hours_ago), model=model, task="mnemonic", outcome=outcome,
+            http_status={"ok": 200, "overloaded": 503, "quota": 429, "timeout": None}.get(outcome), latency_ms=ms,
+            prompt_tokens=100 if outcome == "ok" else None, output_tokens=50 if outcome == "ok" else None,
+        )
+
+
+def test_model_stats_counts_outcomes_and_latency(database):
+    _seed(database, [
+        ("fast", "ok", 1000, 1), ("fast", "ok", 2000, 1), ("fast", "ok", 3000, 1), ("fast", "ok", 10000, 1),
+        ("fast", "overloaded", 4000, 1), ("fast", "timeout", 25000, 1), ("fast", "quota", 300, 1),
+        ("fast", "ok", 500, 24 * 10),  # ten days ago
+        ("dead", "overloaded", 15000, 2),
+    ])
+    since = datetime.now(timezone.utc) - timedelta(days=7)
+    stats = {s.model: s for s in database.model_stats(since)}
+    fast = stats["fast"]
+    assert (fast.calls, fast.ok, fast.overloaded, fast.timeouts, fast.quota, fast.other_failures) == (7, 4, 1, 1, 1, 0)
+    assert (fast.median_ms, fast.p90_ms, fast.fastest_ms) == (2500, 10000, 1000)
+    assert fast.ms_lost == 4000 + 25000 + 300
+    assert fast.avg_tokens == 150
+    assert stats["dead"].median_ms is None and stats["dead"].success_rate == 0
+    # All time includes the old call
+    assert {s.model: s.calls for s in database.model_stats()}["fast"] == 8
+
+
+def test_performance_report_ranks_fastest_reliable_model():
+    from gemini_client import model_health, performance_report
+    _seed(model_health.db, [
+        # quickest, but only answers half the time: not "reliable"
+        ("flaky", "ok", 800, 1), ("flaky", "ok", 900, 1), ("flaky", "ok", 700, 1),
+        ("flaky", "overloaded", 15000, 1), ("flaky", "overloaded", 15000, 1), ("flaky", "timeout", 25000, 1),
+        ("steady", "ok", 3000, 1), ("steady", "ok", 3500, 1), ("steady", "ok", 4000, 1), ("steady", "ok", 4500, 1),
+        ("slow", "ok", 9000, 1), ("slow", "ok", 9500, 1), ("slow", "ok", 9900, 1),
+        ("broken", "overloaded", 5000, 1),
+    ])
+    report = performance_report("day")
+    assert [m["model"] for m in report["models"]] == ["flaky", "steady", "slow", "broken"]
+    assert report["fastestReliable"] == "steady"
+    assert report["totals"]["calls"] == 14 and report["totals"]["msLost"] == 15000 * 2 + 25000 + 5000
+    assert report["recentFailures"][0]["model"] == "broken"
+
+
+def test_stats_endpoint_validates_the_range():
+    from fastapi.testclient import TestClient
+    import app as app_module
+    client = TestClient(app_module.app)
+    assert client.get("/api/gemini/stats?range=all").status_code == 200
+    bad = client.get("/api/gemini/stats?range=year")
+    assert bad.status_code == 400 and "day, week, month, all" in bad.json()["detail"]

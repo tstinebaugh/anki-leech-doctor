@@ -3846,6 +3846,7 @@ body {
 }
 .usage-table code {
   font-size: 0.78rem;
+  white-space: nowrap; /* scroll the table sideways rather than split model names */
 }
 .usage-bar {
   height: 4px;
@@ -3951,4 +3952,137 @@ body {
 }
 @media (max-width: 520px) {
   .dup-item { flex-direction: column; }
+}
+
+/* ---- Debug: Gemini performance dashboard (Settings) ---- */
+.perf-section > summary {
+  cursor: pointer;
+  list-style: none;
+}
+.perf-section > summary::-webkit-details-marker { display: none; }
+.perf-section > summary::after {
+  content: "▸";
+  float: right;
+  color: var(--text-muted);
+  transition: transform 0.15s;
+}
+.perf-section[open] > summary::after { transform: rotate(90deg); }
+.perf-ranges {
+  display: inline-flex;
+  gap: 2px;
+  margin: 0.6rem 0;
+  padding: 2px;
+  border-radius: var(--radius-sm);
+  background: rgba(148, 163, 184, 0.12);
+}
+.perf-range {
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  padding: 0.3rem 0.65rem;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.perf-range.active {
+  background: var(--accent-primary);
+  color: #fff;
+}
+.perf-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
+  gap: 0.4rem;
+  margin-bottom: 0.6rem;
+}
+.perf-stat {
+  display: flex;
+  flex-direction: column;
+  padding: 0.45rem 0.6rem;
+  border-radius: var(--radius-sm);
+  background: rgba(15, 23, 42, 0.45);
+}
+.perf-stat strong {
+  font-size: 1.05rem;
+  font-variant-numeric: tabular-nums;
+}
+.perf-stat span,
+.perf-sub {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+.perf-table td:first-child {
+  min-width: 170px;
+}
+.perf-badge {
+  margin-left: 0.35rem;
+  font-size: 0.66rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  background: rgba(16, 185, 129, 0.18);
+  color: #a7f3d0;
+  white-space: nowrap;
+}
+.perf-latency {
+  position: relative;
+  height: 6px;
+  margin-top: 5px;
+  border-radius: 3px;
+  background: rgba(148, 163, 184, 0.12);
+  overflow: hidden;
+}
+.perf-latency span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 3px;
+}
+.perf-latency-p90 { background: rgba(99, 102, 241, 0.35); }
+.perf-latency-median { background: var(--accent-primary); }
+.perf-latency-none {
+  height: auto;
+  background: none;
+  font-size: 0.68rem;
+  color: var(--accent-rose);
+}
+.perf-rate { font-weight: 600; }
+.perf-rate-good { color: var(--accent-emerald); }
+.perf-rate-warn { color: var(--accent-amber); }
+.perf-rate-bad { color: var(--accent-rose); }
+.perf-fail-title {
+  margin: 0.8rem 0 0.3rem;
+  font-weight: 600;
+  font-size: 0.8rem;
+}
+.perf-failures {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 240px;
+  overflow-y: auto;
+  font-size: 0.76rem;
+}
+.perf-failures li {
+  padding: 0.35rem 0;
+  border-bottom: 1px solid var(--border-subtle);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.4rem;
+}
+.perf-fail-when {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  min-width: 3.5rem;
+}
+.perf-fail-outcome { font-weight: 600; }
+.perf-outcome-overloaded,
+.perf-outcome-timeout { color: var(--accent-amber); }
+.perf-outcome-quota,
+.perf-outcome-rate_limited,
+.perf-outcome-error,
+.perf-outcome-offline,
+.perf-outcome-not_found { color: var(--accent-rose); }
+.perf-fail-error {
+  flex-basis: 100%;
+  color: var(--text-muted);
+  font-size: 0.7rem;
 }

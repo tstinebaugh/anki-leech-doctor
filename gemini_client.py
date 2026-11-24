@@ -467,6 +467,70 @@ def usage_report(models: List[str]) -> Dict[str, Any]:
     }
 
 
+STATS_RANGES = {"day": timedelta(days=1), "week": timedelta(days=7), "month": timedelta(days=30), "all": None}
+
+
+def performance_report(range_name: str = "week") -> Dict[str, Any]:
+    """Per-model speed and reliability over a rolling window, fastest first.
+
+    "Fastest reliable" is the quickest median among models that answered at least 80% of
+    the time and at least 3 times, so one lucky reply doesn't win."""
+    if range_name not in STATS_RANGES:
+        raise ValueError(f"range must be one of {', '.join(STATS_RANGES)}")
+    db = model_health.db
+    span = STATS_RANGES[range_name]
+    since = datetime.now(timezone.utc) - span if span else None
+    stats = db.model_stats(since) if db else []
+    stats.sort(key=lambda st: (st.median_ms is None, st.median_ms or 0, st.model))
+    reliable = [st for st in stats if st.ok >= 3 and (st.success_rate or 0) >= 0.8 and st.median_ms is not None]
+    fastest = min(reliable, key=lambda st: st.median_ms).model if reliable else None
+    failures = db.recent_failures(since) if db else []
+    return {
+        "range": range_name,
+        "since": since.isoformat() if since else None,
+        "fastestReliable": fastest,
+        "totals": {
+            "calls": sum(st.calls for st in stats),
+            "ok": sum(st.ok for st in stats),
+            "overloaded": sum(st.overloaded for st in stats),
+            "timeouts": sum(st.timeouts for st in stats),
+            "quota": sum(st.quota for st in stats),
+            "msLost": sum(st.ms_lost for st in stats),
+        },
+        "models": [
+            {
+                "model": st.model,
+                "calls": st.calls,
+                "ok": st.ok,
+                "successRate": st.success_rate,
+                "overloaded": st.overloaded,
+                "timeouts": st.timeouts,
+                "quota": st.quota,
+                "otherFailures": st.other_failures,
+                "medianMs": st.median_ms,
+                "p90Ms": st.p90_ms,
+                "fastestMs": st.fastest_ms,
+                "msLost": st.ms_lost,
+                "avgTokens": st.avg_tokens,
+                "lastUsed": st.last_used.isoformat() if st.last_used else None,
+            }
+            for st in stats
+        ],
+        "recentFailures": [
+            {
+                "at": f.started_at.isoformat(),
+                "model": f.model,
+                "task": f.task,
+                "outcome": f.outcome,
+                "httpStatus": f.http_status,
+                "latencyMs": f.latency_ms,
+                "error": (f.error or "")[:200],
+            }
+            for f in failures
+        ],
+    }
+
+
 class GeminiClient:
     def __init__(self, config_path: str = DEFAULT_CONFIG_PATH):
         self.config_path = config_path

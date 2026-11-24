@@ -432,6 +432,112 @@ async function loadGeminiUsage() {
   }
 }
 
+// ---- Debug: Gemini performance (Settings) ------------------------------------------------
+let geminiPerfRange = "week";
+
+function fmtSeconds(ms) {
+  if (ms == null) return "–";
+  return ms < 10000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms / 1000)}s`;
+}
+
+function fmtDuration(ms) {
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  return m < 60 ? `${m}m ${s % 60}s` : `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
+function fmtWhen(iso) {
+  const d = new Date(iso);
+  const sameDay = d.toDateString() === new Date().toDateString();
+  return sameDay
+    ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    : d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+const OUTCOME_LABELS = {
+  overloaded: "Overloaded",
+  timeout: "Timed out",
+  quota: "Out of quota",
+  rate_limited: "Rate limited",
+  empty: "Empty reply",
+  not_found: "Model not found",
+  offline: "No connection",
+  error: "Error",
+};
+
+async function loadGeminiPerformance(range = geminiPerfRange) {
+  geminiPerfRange = range;
+  document.querySelectorAll(".perf-range").forEach((b) => {
+    const on = b.dataset.range === range;
+    b.classList.toggle("active", on);
+    b.setAttribute("aria-selected", on ? "true" : "false");
+  });
+  const body = document.getElementById("gemini-perf-body");
+  if (!body) return;
+  try {
+    const res = await fetch(`/api/gemini/stats?range=${encodeURIComponent(range)}`);
+    if (!res.ok) throw new Error((await res.json()).detail || "Could not load stats");
+    const data = await res.json();
+    if (!data.models.length) {
+      body.innerHTML = '<p class="form-help">No Gemini requests in this period yet.</p>';
+      return;
+    }
+    const t = data.totals;
+    const pct = (n) => (t.calls ? Math.round((n / t.calls) * 100) : 0);
+    const slowest = Math.max(...data.models.map((m) => m.p90Ms || m.medianMs || 0), 1);
+    const rows = data.models.map((m) => {
+      const rate = m.successRate == null ? 0 : Math.round(m.successRate * 100);
+      const rateClass = rate >= 80 ? "good" : rate >= 50 ? "warn" : "bad";
+      const fastest = m.model === data.fastestReliable ? '<span class="perf-badge">⚡ Fastest reliable</span>' : "";
+      const bar = m.medianMs != null
+        ? `<div class="perf-latency" title="median ${fmtSeconds(m.medianMs)}, p90 ${fmtSeconds(m.p90Ms)}">
+             <span class="perf-latency-p90" style="width:${((m.p90Ms || m.medianMs) / slowest) * 100}%"></span>
+             <span class="perf-latency-median" style="width:${(m.medianMs / slowest) * 100}%"></span>
+           </div>`
+        : '<div class="perf-latency perf-latency-none">never answered</div>';
+      return `<tr>
+        <td><code>${escapeHtml(m.model)}</code>${fastest}${bar}</td>
+        <td class="num">${fmtSeconds(m.medianMs)}</td>
+        <td class="num">${fmtSeconds(m.p90Ms)}</td>
+        <td class="num"><span class="perf-rate perf-rate-${rateClass}">${rate}%</span><div class="perf-sub">${m.ok}/${m.calls}</div></td>
+        <td class="num">${m.overloaded || "–"}</td>
+        <td class="num">${m.timeouts || "–"}</td>
+        <td class="num">${m.quota || "–"}</td>
+        <td class="num">${m.msLost ? fmtDuration(m.msLost) : "–"}</td>
+      </tr>`;
+    }).join("");
+    const failures = data.recentFailures.map((f) => `<li>
+        <span class="perf-fail-when">${escapeHtml(fmtWhen(f.at))}</span>
+        <code>${escapeHtml(f.model)}</code>
+        <span class="perf-fail-outcome perf-outcome-${escapeHtml(f.outcome)}">${escapeHtml(OUTCOME_LABELS[f.outcome] || f.outcome)}</span>
+        <span class="perf-sub">${escapeHtml(f.task || "")} · ${fmtSeconds(f.latencyMs)}</span>
+        ${f.error ? `<div class="perf-fail-error">${escapeHtml(f.error)}</div>` : ""}
+      </li>`).join("");
+    body.innerHTML = `
+      <div class="perf-summary">
+        <div class="perf-stat"><strong>${t.calls}</strong><span>requests</span></div>
+        <div class="perf-stat"><strong>${pct(t.ok)}%</strong><span>answered</span></div>
+        <div class="perf-stat"><strong>${t.overloaded}</strong><span>overloaded</span></div>
+        <div class="perf-stat"><strong>${t.timeouts}</strong><span>timed out</span></div>
+        <div class="perf-stat"><strong>${t.quota}</strong><span>quota / rate limit</span></div>
+        <div class="perf-stat"><strong>${fmtDuration(t.msLost)}</strong><span>lost to failures</span></div>
+      </div>
+      <div class="usage-table-wrap">
+        <table class="usage-table perf-table">
+          <thead><tr>
+            <th>Model <span class="perf-sub">(fastest first)</span></th><th class="num">Median</th><th class="num">p90</th>
+            <th class="num">Success</th><th class="num">Overloaded</th><th class="num">Timeouts</th><th class="num">Quota</th><th class="num">Time lost</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+      ${failures ? `<div class="perf-fail-title">Recent failures</div><ul class="perf-failures">${failures}</ul>` : ""}`;
+  } catch (err) {
+    body.innerHTML = `<p class="form-help">Stats unavailable: ${escapeHtml(err.message)}</p>`;
+  }
+}
+
 // Convert bracket furigana syntax (e.g. 来週[らいしゅう]の 社員[しゃいん]) to HTML Ruby
 function parseFuriganaRuby(text) {
   if (!text) return "";
@@ -3409,6 +3515,13 @@ function setupEventListeners() {
   if (el.miningForm) {
     el.miningForm.addEventListener("submit", handleMiningSubmit);
   }
+  const perfSection = document.getElementById("gemini-perf");
+  if (perfSection) {
+    // Only query the log when the debug section is actually opened
+    perfSection.addEventListener("toggle", () => { if (perfSection.open) loadGeminiPerformance(); });
+    perfSection.querySelectorAll(".perf-range").forEach((b) =>
+      b.addEventListener("click", () => loadGeminiPerformance(b.dataset.range)));
+  }
   // A different word or card type needs a fresh duplicate check
   if (el.miningInputVocab) el.miningInputVocab.addEventListener("input", resetMiningDuplicates);
   document.querySelectorAll(".btn-mining-type").forEach((b) => b.addEventListener("click", resetMiningDuplicates));
@@ -3455,6 +3568,8 @@ function setupEventListeners() {
   el.btnOpenSettings.addEventListener("click", () => {
     el.settingsModal.classList.remove("hidden");
     loadGeminiUsage();
+    const perf = document.getElementById("gemini-perf");
+    if (perf && perf.open) loadGeminiPerformance();
   });
   el.btnCloseSettings.addEventListener("click", () => {
     el.settingsModal.classList.add("hidden");
