@@ -15,6 +15,10 @@ missing from the model list, or that Gemini last answered with a 404 (the list s
 models it no longer serves to new keys, like gemini-2.5-flash), are skipped, and so is a
 name that points at the same model as one already in the order, since both would share
 that model's quota and overload.
+
+Non-Gemini providers (the OpenAI-compatible fallback, logged as "openai:<model>") come last
+with role "provider": they get their call-log stats but none of the model-list or alias
+checks, since Gemini's list never has them.
 """
 import asyncio
 import logging
@@ -23,7 +27,7 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 import httpx
 
@@ -41,6 +45,14 @@ HEALTH_WINDOW = timedelta(days=7)
 PRIOR_MS = 10_000
 # Set to 0 to never fetch the model list on its own (the tests do this)
 AUTO_REFRESH = os.environ.get("LEECH_DOCTOR_MODEL_REFRESH", "1") != "0"
+
+# Prefix of the call-log name of a model served by the OpenAI-compatible fallback provider
+PROVIDER_PREFIX = "openai:"
+
+
+def is_provider(name: str) -> bool:
+    return name.startswith(PROVIDER_PREFIX)
+
 
 # Plain text Flash models: gemini-3.8-flash, gemini-3.1-flash-lite-preview,
 # gemini-flash-latest... but not the TTS, image, live or tool-specific variants.
@@ -159,7 +171,7 @@ def expected_ms(stats: Optional[ModelStats]) -> float:
 @dataclass
 class PlanEntry:
     model: str
-    role: str                         # configured, fallback
+    role: str                         # configured, fallback, provider (not Gemini, tried last)
     status: str                       # try, duplicate (same model as an earlier entry), missing
     expected_ms: float
     resolves_to: Optional[str] = None
@@ -168,9 +180,12 @@ class PlanEntry:
 
 
 def fallback_plan(configured: str, pool: List[str], db: Optional[Database],
-                  now: Optional[datetime] = None) -> List[PlanEntry]:
-    """The configured model, then every fallback in the order to try it (see module docstring)."""
+                  now: Optional[datetime] = None, providers: Sequence[str] = ()) -> List[PlanEntry]:
+    """The configured model, then every fallback in the order to try it, then `providers`
+    (non-Gemini models, tried after every Gemini model; see module docstring)."""
     now = now or datetime.now(timezone.utc)
+    providers = list(dict.fromkeys([*providers, *(m for m in pool if is_provider(m))]))
+    pool = [m for m in pool if not is_provider(m)]
     stats: Dict[str, ModelStats] = {}
     resolves: Dict[str, str] = {}
     present: Optional[set] = None
@@ -207,22 +222,28 @@ def fallback_plan(configured: str, pool: List[str], db: Optional[Database],
             e.status, e.note = "duplicate", f"points at {target}, which is already tried"
         else:
             served.add(target)
-    return [first] + [e for e in fallbacks if e.status == "try"] + [e for e in fallbacks if e.status != "try"]
+    extra = [entry(m, "provider") for m in providers]
+    for e in extra:
+        e.resolves_to = None  # its modelVersion is the provider's own name, not a Gemini alias
+    return [first] + [e for e in fallbacks if e.status == "try"] + extra + [e for e in fallbacks if e.status != "try"]
 
 
 def try_order(configured: str, pool: List[str], db: Optional[Database]) -> List[str]:
-    return [e.model for e in fallback_plan(configured, pool, db) if e.status == "try" or e.role == "configured"]
+    """The Gemini models to try, in order. Providers are left out: _call_gemini asks them itself."""
+    return [e.model for e in fallback_plan(configured, pool, db)
+            if e.role == "configured" or (e.role == "fallback" and e.status == "try")]
 
 
 # ---- report for the Settings page ----------------------------------------------------------
 
-def catalog_report(configured: str, pool: List[str], db: Optional[Database]) -> Dict[str, Any]:
+def catalog_report(configured: str, pool: List[str], db: Optional[Database],
+                   providers: Sequence[str] = ()) -> Dict[str, Any]:
     now = datetime.now(timezone.utc)
     catalog = db.catalog() if db is not None else []
     fetched = max((m.last_seen_at for m in catalog), default=None)
     first_fetch = min((m.first_seen_at for m in catalog), default=None)
     by_name = {m.name: m for m in catalog}
-    plan = fallback_plan(configured, pool, db, now)
+    plan = fallback_plan(configured, pool, db, now, providers)
     resolves = {e.model: e.resolves_to for e in plan}
     if db is not None:
         resolves = {**db.resolved_versions(now - HEALTH_WINDOW), **{k: v for k, v in resolves.items() if v}}

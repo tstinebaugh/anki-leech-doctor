@@ -241,6 +241,10 @@ const el = {
 
   // Settings form
   settingApiKey: document.getElementById("setting-api-key"),
+  settingOpenaiBaseUrl: document.getElementById("setting-openai-base-url"),
+  settingOpenaiModel: document.getElementById("setting-openai-model"),
+  settingOpenaiApiKey: document.getElementById("setting-openai-api-key"),
+  settingOpenaiClearKey: document.getElementById("setting-openai-clear-key"),
   settingModel: document.getElementById("setting-model"),
   settingPersona: document.getElementById("setting-persona"),
   settingTone: document.getElementById("setting-tone"),
@@ -565,6 +569,7 @@ function renderGeminiModels(body, data) {
     const alias = m.resolvesTo ? `<div class="perf-sub">→ <code>${escapeHtml(m.resolvesTo)}</code></div>` : "";
     const badge = m.role === "configured"
       ? '<span class="perf-badge">Your model</span>'
+      : m.role === "provider" ? '<span class="perf-badge">Fallback provider</span>'
       : used ? "" : `<span class="perf-badge perf-badge-muted">${escapeHtml(MODEL_STATUS_LABELS[m.status] || m.status)}</span>`;
     const note = m.note ? `<div class="perf-sub">${escapeHtml(m.note)}</div>` : "";
     const action = m.role === "fallback"
@@ -924,6 +929,7 @@ async function loadConfig() {
     if (el.settingReviewScope) el.settingReviewScope.value = cfg.reviewScopeQuery || "";
     if (el.settingNoteType) el.settingNoteType.value = cfg.miningNoteType || "";
     if (el.settingRagExcludeSuspended) el.settingRagExcludeSuspended.checked = Boolean(cfg.ragExcludeSuspended);
+    fillKeySettings(cfg);
     if (el.miningModalTargetDeck) el.miningModalTargetDeck.textContent = state.targetMiningDeck;
     if (el.btnAddMinedLabel) el.btnAddMinedLabel.textContent = `Add to ${state.targetMiningDeck.split("::").pop()}`;
 
@@ -959,6 +965,25 @@ async function loadConfig() {
   } catch (err) {
     console.error("Error loading config:", err);
   }
+}
+
+// API keys are never sent back to the page: the fields stay empty and show the masked key.
+function fillKeySettings(cfg) {
+  if (el.settingApiKey) {
+    el.settingApiKey.value = "";
+    el.settingApiKey.placeholder = cfg.maskedKey ? `Saved: ${cfg.maskedKey}` : "AIzaSy...";
+  }
+  if (el.settingOpenaiBaseUrl) el.settingOpenaiBaseUrl.value = cfg.openaiCompatBaseUrl || "";
+  if (el.settingOpenaiModel) el.settingOpenaiModel.value = cfg.openaiCompatModel || "";
+  if (el.settingOpenaiApiKey) {
+    el.settingOpenaiApiKey.value = "";
+    el.settingOpenaiApiKey.placeholder = cfg.maskedOpenaiCompatKey
+      ? `Saved: ${cfg.maskedOpenaiCompatKey}`
+      : "nvapi-... (not needed for Ollama)";
+  }
+  if (el.settingOpenaiClearKey) el.settingOpenaiClearKey.checked = false;
+  const compatSection = document.getElementById("openai-compat-settings");
+  if (compatSection && cfg.openaiCompatBaseUrl) compatSection.open = true;
 }
 
 function updateMnemonicStyleButtons(selectedStyle) {
@@ -3718,6 +3743,10 @@ function setupEventListeners() {
     const payload = {
       apiKey: el.settingApiKey.value.trim() || undefined,
       model: el.settingModel.value,
+      openaiCompatBaseUrl: el.settingOpenaiBaseUrl ? el.settingOpenaiBaseUrl.value.trim() : undefined,
+      openaiCompatModel: el.settingOpenaiModel ? el.settingOpenaiModel.value.trim() : undefined,
+      openaiCompatApiKey: el.settingOpenaiApiKey ? (el.settingOpenaiApiKey.value.trim() || undefined) : undefined,
+      clearOpenaiCompatApiKey: el.settingOpenaiClearKey ? el.settingOpenaiClearKey.checked || undefined : undefined,
       persona: el.settingPersona.value.trim(),
       mnemonicTone: el.settingTone.value.trim(),
       jlptLevel: el.settingJlptLevel ? el.settingJlptLevel.value : undefined,
@@ -3738,10 +3767,16 @@ function setupEventListeners() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload)
       });
-      if (!res.ok) throw new Error("Failed to save settings");
-      
+      if (!res.ok) {
+        let detail = "Error saving settings.";
+        try { detail = (await res.json()).detail || detail; } catch (_) { /* not JSON */ }
+        showToast(detail, "error");
+        return;
+      }
+
       const data = await res.json();
       state.config = data.config;
+      fillKeySettings(data.config);
       state.jlptLevel = data.config.jlptLevel;
       state.kanjiStrategy = data.config.kanjiStrategy;
       state.kanjiDeckName = data.config.kanjiDeckName;
