@@ -3,15 +3,15 @@ import json
 import re
 import time
 import logging
-import tempfile
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 import httpx
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 logger = logging.getLogger(__name__)
 
-from config_defaults import CONFIG_PATH as DEFAULT_CONFIG_PATH, DEFAULT_CONFIG, MODEL_HEALTH_PATH
+from config_defaults import CONFIG_PATH as DEFAULT_CONFIG_PATH, DEFAULT_CONFIG
+from db import Database, get_database
 from furigana import clean_sentence_pair, kanji_without_reading, normalize_furigana
 
 GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
@@ -23,15 +23,42 @@ GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
 
 # Tried in this order after the configured model. The preview and lite models were the
 # ones still answering in 1-3s while the stable Flash models were overloaded.
-FALLBACK_MODELS = ["gemini-3-flash-preview", "gemini-flash-lite-latest", "gemini-flash-latest"]
+# Each model has its own free-tier quota (20 requests a day for the Flash models), so a few
+# extra fallbacks also mean more free requests per day.
+FALLBACK_MODELS = [
+    "gemini-3-flash-preview",
+    "gemini-3.6-flash",
+    "gemini-flash-lite-latest",
+    "gemini-3.1-flash-lite",
+    "gemini-flash-latest",
+]
 ATTEMPT_TIMEOUT = 25.0     # seconds to wait for one model; healthy replies take 1-10s
 CONNECT_TIMEOUT = 10.0
 TOTAL_TIME_BUDGET = 60.0   # seconds for one call across all models
+BUSY_RETRY_AFTER = 5       # seconds the frontend should wait before retrying a busy call
 COOLDOWN_BASE = 60.0       # first failure; doubles on each consecutive failure
 COOLDOWN_MAX = 600.0
 COOLDOWN_NOT_FOUND = 3600.0
 COOLDOWN_QUOTA_MAX = 26 * 3600.0  # a daily quota resets within a day; ignore anything longer
 QUOTA_RESET_TZ = "America/Los_Angeles"  # Gemini's daily quotas reset at midnight Pacific
+
+
+class GeminiBusyError(RuntimeError):
+    """Every usable model was overloaded, timed out or briefly rate limited.
+
+    Worth retrying shortly: the API answers 503 with Retry-After and the frontend retries."""
+
+    def __init__(self, message: str, retry_after: int = BUSY_RETRY_AFTER):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
+class GeminiQuotaError(RuntimeError):
+    """Every model is out of quota (or missing) until `available_at`; retrying now won't help."""
+
+    def __init__(self, message: str, available_at: float):
+        super().__init__(message)
+        self.available_at = available_at
 
 
 class ModelHealth:
@@ -43,66 +70,76 @@ class ModelHealth:
     - hard (quota used up, model not found): not tried at all until it ends. For a 429
       that is when Google says the quota resets, e.g. midnight Pacific for daily quotas.
 
-    Cooldowns use wall-clock time and are saved to a small JSON file, so restarting the
-    server doesn't forget that today's quota is gone.
+    Cooldowns are kept in memory and saved to the model_cooldowns table (db.py), so
+    restarting the server doesn't forget that today's quota is gone.
     """
 
-    def __init__(self, path: Optional[str] = None) -> None:
-        self.path = path
+    def __init__(self, database: Union[Database, Callable[[], Database], None] = None) -> None:
+        self._database = database
+        self._loaded = False
         self._until: Dict[str, float] = {}
         self._hard: set = set()
         self._reason: Dict[str, str] = {}
         self._strikes: Dict[str, int] = {}
         self.no_thinking: set = set()  # models that rejected our thinkingConfig
-        self._load()
 
-    def _load(self) -> None:
-        if not self.path or not os.path.exists(self.path):
+    @property
+    def db(self) -> Optional[Database]:
+        if callable(self._database) and not isinstance(self._database, Database):
+            self._database = self._database()
+        return self._database
+
+    def _ensure_loaded(self) -> None:
+        if self._loaded:
+            return
+        self._loaded = True
+        if self.db is None:
             return
         try:
-            with open(self.path, "r", encoding="utf-8") as f:
-                saved = json.load(f)
-            now = time.time()
-            for model, entry in saved.items():
-                if float(entry["until"]) > now:
-                    self._until[model] = float(entry["until"])
-                    self._reason[model] = str(entry.get("reason", ""))
-                    if entry.get("hard"):
-                        self._hard.add(model)
+            for row in self.db.active_cooldowns():
+                self._until[row.model] = row.until.timestamp()
+                self._reason[row.model] = row.reason
+                self._strikes[row.model] = row.strikes
+                if row.hard:
+                    self._hard.add(row.model)
         except Exception as e:
-            logger.warning(f"Ignoring unreadable model cooldown file {self.path}: {e}")
+            logger.warning(f"Could not load model cooldowns: {e}")
 
-    def _save(self) -> None:
-        if not self.path:
+    def _persist(self, model: str) -> None:
+        if self.db is None:
             return
-        now = time.time()
-        data = {
-            m: {"until": t, "hard": m in self._hard, "reason": self._reason.get(m, "")}
-            for m, t in self._until.items() if t > now
-        }
         try:
-            directory = os.path.dirname(self.path) or "."
-            os.makedirs(directory, exist_ok=True)
-            fd, tmp = tempfile.mkstemp(dir=directory, prefix=".model_health-", suffix=".tmp")
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=1)
-            os.replace(tmp, self.path)
-        except OSError as e:
-            logger.warning(f"Could not save model cooldowns to {self.path}: {e}")
+            if model in self._until:
+                self.db.save_cooldown(
+                    model,
+                    until=datetime.fromtimestamp(self._until[model], timezone.utc),
+                    hard=model in self._hard,
+                    reason=self._reason.get(model, ""),
+                    strikes=self._strikes.get(model, 0),
+                )
+            else:
+                self.db.delete_cooldown(model)
+        except Exception as e:
+            logger.warning(f"Could not save the cooldown for {model}: {e}")
 
     def cooldown_left(self, model: str) -> float:
+        self._ensure_loaded()
         return max(0.0, self._until.get(model, 0.0) - time.time())
 
     def available_at(self, model: str) -> float:
+        self._ensure_loaded()
         return self._until.get(model, 0.0)
 
     def is_blocked(self, model: str) -> bool:
+        self._ensure_loaded()
         return model in self._hard and self.cooldown_left(model) > 0
 
     def reason(self, model: str) -> str:
+        self._ensure_loaded()
         return self._reason.get(model, "")
 
     def failed(self, model: str, retry_after: Optional[float] = None, hard: bool = False, reason: str = "") -> None:
+        self._ensure_loaded()
         strikes = self._strikes.get(model, 0) + 1
         self._strikes[model] = strikes
         if retry_after:
@@ -117,29 +154,32 @@ class ModelHealth:
             self._hard.add(model)
         else:
             self._hard.discard(model)
-        self._save()
+        self._persist(model)
 
     def succeeded(self, model: str) -> None:
+        self._ensure_loaded()
         self._strikes.pop(model, None)
         if self._until.pop(model, None) is not None:
             self._hard.discard(model)
             self._reason.pop(model, None)
-            self._save()
+            self._persist(model)
 
-    def order(self, models: List[str]) -> Tuple[List[str], List[str]]:
+    def order(self, models: List[str], demote: Optional[set] = None) -> Tuple[List[str], List[str]]:
         """(models to try, models blocked until their cooldown ends).
 
-        Healthy models come first in their given order, then soft-cooling ones,
-        soonest-recovering first."""
+        Healthy models come first in their given order, then those in `demote` (e.g. at
+        their daily limit by our count), then soft-cooling ones, soonest-recovering first."""
         seen: List[str] = []
         for m in models:
             if m not in seen:
                 seen.append(m)
+        demote = demote or set()
         blocked = [m for m in seen if self.is_blocked(m)]
         rest = [m for m in seen if m not in blocked]
-        healthy = [m for m in rest if not self.cooldown_left(m)]
+        healthy = [m for m in rest if not self.cooldown_left(m) and m not in demote]
+        used_up = [m for m in rest if not self.cooldown_left(m) and m in demote]
         cooling = sorted((m for m in rest if self.cooldown_left(m)), key=self.cooldown_left)
-        return healthy + cooling, blocked
+        return healthy + used_up + cooling, blocked
 
     def reset(self) -> None:
         self._until.clear()
@@ -147,8 +187,15 @@ class ModelHealth:
         self._reason.clear()
         self._strikes.clear()
         self.no_thinking.clear()
-        if self.path and os.path.exists(self.path):
-            os.remove(self.path)
+        self._loaded = True
+        if self.db is not None:
+            self.db.clear()
+
+
+def quota_day_start(now: Optional[float] = None) -> datetime:
+    """Start of the current quota day (midnight Pacific), as a UTC datetime."""
+    current = datetime.fromtimestamp(now if now is not None else time.time(), ZoneInfo(QUOTA_RESET_TZ))
+    return current.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
 
 
 def seconds_until_quota_reset(now: Optional[float] = None) -> float:
@@ -171,7 +218,7 @@ def describe_until(timestamp: float) -> str:
     return f"until{day} {at:%H:%M} (in {span})"
 
 
-model_health = ModelHealth(MODEL_HEALTH_PATH)
+model_health = ModelHealth(get_database)
 
 
 def thinking_config_for(model: str, level: str) -> Optional[Dict[str, Any]]:
@@ -182,6 +229,15 @@ def thinking_config_for(model: str, level: str) -> Optional[Dict[str, Any]]:
     if "2.5" in name or "2-5" in name:
         return None if "pro" in name else {"thinkingBudget": 0}
     return {"thinkingLevel": level}
+
+
+def _token_usage(data: Dict[str, Any]) -> Dict[str, Optional[int]]:
+    usage = data.get("usageMetadata") or {}
+    return {
+        "prompt_tokens": usage.get("promptTokenCount"),
+        "output_tokens": usage.get("candidatesTokenCount"),
+        "thought_tokens": usage.get("thoughtsTokenCount"),
+    }
 
 
 def _extract_text(data: Dict[str, Any]) -> Tuple[str, str]:
@@ -199,14 +255,16 @@ def _extract_text(data: Dict[str, Any]) -> Tuple[str, str]:
     return "", "Empty text parts returned"
 
 
-def _parse_error(resp: httpx.Response) -> Tuple[str, Optional[float], bool]:
-    """(message, seconds until Google says to retry, whether a daily quota ran out)."""
+def _parse_error(resp: httpx.Response) -> Tuple[str, Optional[float], bool, Optional[int]]:
+    """(message, seconds until Google says to retry, whether a daily quota ran out,
+    that quota's daily limit)."""
     try:
         err = resp.json().get("error", {})
     except Exception:
-        return resp.text, None, False
+        return resp.text, None, False, None
     retry_after = None
     daily = False
+    limit = None
     for detail in err.get("details", []) or []:
         delay = str(detail.get("retryDelay", ""))
         if delay.endswith("s"):
@@ -218,7 +276,11 @@ def _parse_error(resp: httpx.Response) -> Tuple[str, Optional[float], bool]:
             quota = f"{violation.get('quotaId', '')} {violation.get('description', '')}".lower()
             if "perday" in quota or "per day" in quota:
                 daily = True
-    return err.get("message", resp.text), retry_after, daily
+                try:
+                    limit = int(violation.get("quotaValue"))
+                except (TypeError, ValueError):
+                    pass
+    return err.get("message", resp.text), retry_after, daily, limit
 
 
 KANJI_CHARS = r"\u4e00-\u9faf々〆ヶ"
@@ -323,6 +385,87 @@ def validate_persona_sentence(parsed: Dict[str, Any], vocab_kanji: str, is_gramm
 
     is_valid = len(errors) == 0
     return is_valid, errors
+
+def _outcome_for(status: int, daily_quota: bool) -> str:
+    if status == 429:
+        return "quota" if daily_quota else "rate_limited"
+    if status == 404:
+        return "not_found"
+    if status >= 500:
+        return "overloaded"
+    return "error"
+
+
+def _log_call(model: str, task: str, outcome: str, started_at: datetime, t0: float, **fields: Any) -> None:
+    """Adds one attempt to the call log. Logging must never break a Gemini call."""
+    db = model_health.db
+    if db is None:
+        return
+    try:
+        db.record_call(
+            started_at=started_at, model=model, task=task, outcome=outcome,
+            latency_ms=int((time.monotonic() - t0) * 1000), **fields,
+        )
+    except Exception as e:
+        logger.warning(f"Could not log the Gemini call to {model}: {e}")
+
+
+def _remember_daily_limit(model: str, limit: int) -> None:
+    try:
+        if model_health.db is not None:
+            model_health.db.set_daily_limit(model, limit)
+    except Exception as e:
+        logger.warning(f"Could not save the daily limit for {model}: {e}")
+
+
+def _models_at_daily_limit(models: List[str]) -> set:
+    """Models that, by our own count, have used today's quota. They are tried last rather
+    than skipped: the count is an estimate (the key may be used elsewhere, limits change)."""
+    db = model_health.db
+    if db is None:
+        return set()
+    try:
+        limits = db.daily_limits()
+        if not limits:
+            return set()
+        used = db.answered_since(quota_day_start())
+        return {m for m in models if m in limits and used.get(m, 0) >= limits[m]}
+    except Exception as e:
+        logger.warning(f"Could not read today's Gemini usage: {e}")
+        return set()
+
+
+def usage_report(models: List[str]) -> Dict[str, Any]:
+    """Today's usage per model (quota day = since midnight Pacific) plus cooldown state."""
+    db = model_health.db
+    day_start = quota_day_start()
+    usage = {u.model: u for u in (db.usage_since(day_start) if db else [])}
+    limits = db.daily_limits() if db else {}
+    rows = []
+    for m in list(dict.fromkeys(models + sorted(usage))):
+        u = usage.get(m)
+        left = model_health.cooldown_left(m)
+        rows.append({
+            "model": m,
+            "requests": u.requests if u else 0,
+            "answered": u.answered if u else 0,
+            "failed": u.failed if u else 0,
+            "medianMs": u.median_ms if u else None,
+            "tokens": u.tokens if u else 0,
+            "dailyLimit": limits.get(m),
+            "status": (
+                ("blocked" if model_health.is_blocked(m) else "cooling") if left else "ok"
+            ),
+            "statusDetail": (
+                f"{model_health.reason(m) or 'unavailable'} {describe_until(model_health.available_at(m))}" if left else ""
+            ),
+        })
+    return {
+        "dayStartedAt": day_start.isoformat(),
+        "resetsIn": describe_until(time.time() + seconds_until_quota_reset()),
+        "models": rows,
+    }
+
 
 class GeminiClient:
     def __init__(self, config_path: str = DEFAULT_CONFIG_PATH):
@@ -445,12 +588,15 @@ class GeminiClient:
             logger.warning(f"Failed to fetch dynamic models list: {e}")
         return default_fallback
 
-    async def _call_gemini(self, contents: List[Dict[str, Any]], system_instruction: Optional[str] = None) -> str:
+    async def _call_gemini(
+        self, contents: List[Dict[str, Any]], system_instruction: Optional[str] = None, task: str = ""
+    ) -> str:
+        """Asks the configured model, falling back to others; `task` labels the call log."""
         if not self.api_key:
             raise ValueError("Gemini API key is not configured. Please set your API key in the UI settings or config.json.")
 
         candidates_in_order = [self.model] + [m for m in FALLBACK_MODELS if m != self.model]
-        models_to_try, blocked = model_health.order(candidates_in_order)
+        models_to_try, blocked = model_health.order(candidates_in_order, demote=_models_at_daily_limit(candidates_in_order))
         level = self.config.get("thinkingLevel") or DEFAULT_CONFIG["thinkingLevel"]
         deadline = time.monotonic() + TOTAL_TIME_BUDGET
 
@@ -460,21 +606,29 @@ class GeminiClient:
         }
         if not models_to_try:
             soonest = min(blocked, key=model_health.available_at)
-            raise RuntimeError(
+            logger.warning("No Gemini model available: " + "; ".join(f"[{m}] {e}" for m, e in errors_by_model.items()))
+            raise GeminiQuotaError(
                 f"All Gemini models are out of quota or unavailable. {soonest} can be used again "
-                f"{describe_until(model_health.available_at(soonest))}. "
-                f"Details: {'; '.join(f'[{m}] {e}' for m, e in errors_by_model.items())}"
+                f"{describe_until(model_health.available_at(soonest))}.",
+                available_at=model_health.available_at(soonest),
             )
+        busy = False  # a model failed in a way that may pass in a few seconds
         for model_name in models_to_try:
             remaining = deadline - time.monotonic()
             if remaining < 3:
                 errors_by_model[model_name] = f"not tried, the {TOTAL_TIME_BUDGET:.0f}s time limit ran out"
+                busy = True
                 continue
             cooling = model_health.cooldown_left(model_name)
             if cooling:
                 logger.info(f"Trying {model_name} although it is cooling down ({cooling:.0f}s left): no healthier model answered")
 
             thinking = None if model_name in model_health.no_thinking else thinking_config_for(model_name, level)
+            started_at, t0 = datetime.now(timezone.utc), time.monotonic()
+
+            def log(outcome: str, **fields: Any) -> None:
+                _log_call(model_name, task, outcome, started_at, t0, **fields)
+
             attempt_timeout = httpx.Timeout(min(ATTEMPT_TIMEOUT, remaining), connect=CONNECT_TIMEOUT)
             try:
                 async with httpx.AsyncClient(timeout=attempt_timeout) as client:
@@ -494,6 +648,7 @@ class GeminiClient:
                         )
             except (httpx.ConnectError, httpx.ConnectTimeout) as e:
                 # Every model lives on the same host, so trying the others won't help
+                log("offline", error=str(e))
                 raise RuntimeError(
                     f"Can't reach the Gemini API ({type(e).__name__}). Check your internet connection and try again."
                 ) from e
@@ -501,16 +656,22 @@ class GeminiClient:
                 err_msg = f"Request timed out on {model_name} after {attempt_timeout.read:.0f}s"
                 errors_by_model[model_name] = err_msg
                 model_health.failed(model_name, reason="timed out")
+                log("timeout", error=err_msg)
+                busy = True
                 logger.warning(f"{err_msg}; skipping it {describe_until(model_health.available_at(model_name))}")
                 continue
             except Exception as e:
                 err_msg = f"Error calling {model_name}: {str(e)}"
                 errors_by_model[model_name] = err_msg
+                busy = True  # e.g. a dropped connection mid-reply
+                log("error", error=err_msg)
                 logger.warning(err_msg)
                 continue
 
             if resp.status_code == 200:
-                text, problem = _extract_text(resp.json())
+                data = resp.json()
+                text, problem = _extract_text(data)
+                log("ok" if text else "empty", http_status=200, error=problem or None, **_token_usage(data))
                 if text:
                     model_health.succeeded(model_name)
                     if model_name != self.model:
@@ -519,9 +680,12 @@ class GeminiClient:
                 errors_by_model[model_name] = problem
                 continue
 
-            error_detail, retry_after, daily_quota = _parse_error(resp)
+            error_detail, retry_after, daily_quota, daily_limit = _parse_error(resp)
             err_msg = f"HTTP {resp.status_code}: {error_detail}"
             errors_by_model[model_name] = err_msg
+            log(_outcome_for(resp.status_code, daily_quota), http_status=resp.status_code, error=error_detail)
+            if daily_limit:
+                _remember_daily_limit(model_name, daily_limit)
             if resp.status_code in (401, 403):
                 # A bad or restricted key fails the same way on every model
                 raise RuntimeError(f"Gemini rejected the API key: {err_msg}")
@@ -533,10 +697,12 @@ class GeminiClient:
                     model_name, retry_after=retry_after, hard=retry_after is not None,
                     reason="daily quota used up" if daily_quota else "rate limited",
                 )
+                busy = busy or retry_after is None
             elif resp.status_code == 404:
                 model_health.failed(model_name, hard=True, reason="model not found")
             elif resp.status_code in (500, 502, 503, 504):
                 model_health.failed(model_name, reason=f"overloaded (HTTP {resp.status_code})")
+                busy = True
             if model_health.cooldown_left(model_name):
                 logger.warning(f"Gemini call to {model_name} failed: {err_msg}; skipping it {describe_until(model_health.available_at(model_name))}")
             else:
@@ -544,10 +710,13 @@ class GeminiClient:
 
         primary_err = errors_by_model.get(self.model, "Unknown error")
         details = [f"[{m}] {err}" for m, err in errors_by_model.items()]
-        raise RuntimeError(
+        message = (
             f"Configured Gemini model '{self.model}' failed: {primary_err}. "
             f"All attempted models failed: {'; '.join(details)}"
         )
+        if busy:
+            raise GeminiBusyError(message)
+        raise RuntimeError(message)
 
     @staticmethod
     def _build_payload(
@@ -605,7 +774,7 @@ Return valid JSON with keys:
 - sent_eng
 """
         contents = [{"role": "user", "parts": [{"text": prompt}]}]
-        raw_resp = await self._call_gemini(contents, system_instruction=system_instruction)
+        raw_resp = await self._call_gemini(contents, system_instruction=system_instruction, task="analyze_vocab")
         clean_json = raw_resp.strip()
         if clean_json.startswith("```"):
             clean_json = clean_json.split("\n", 1)[-1]
@@ -689,7 +858,7 @@ Return valid JSON with keys:
 - sent_eng
 """
         contents = [{"role": "user", "parts": [{"text": prompt}]}]
-        raw_resp = await self._call_gemini(contents, system_instruction=system_instruction)
+        raw_resp = await self._call_gemini(contents, system_instruction=system_instruction, task="analyze_grammar")
         try:
             parsed = json.loads(_strip_json_fences(raw_resp))
         except Exception:
@@ -874,7 +1043,7 @@ Generate the mnemonic formatted strictly as follows (no intro sentence, no 'Why 
 """
 
         contents = [{"role": "user", "parts": [{"text": prompt}]}]
-        mnemonic_text = await self._call_gemini(contents, system_instruction=system_instruction)
+        mnemonic_text = await self._call_gemini(contents, system_instruction=system_instruction, task="mnemonic")
         
         # Clean up any stray conversational intro lines or footer sections if model generated them
         lines = mnemonic_text.strip().split("\n")
@@ -963,7 +1132,7 @@ Generate the mnemonic formatted strictly as follows:
         if confusable_cards:
             prompt += "\n### 🔍 Contrast & Disambiguation Hook\n[1-3 sentences]\n"
         contents = [{"role": "user", "parts": [{"text": prompt}]}]
-        text = await self._call_gemini(contents, system_instruction=system_instruction)
+        text = await self._call_gemini(contents, system_instruction=system_instruction, task="grammar_mnemonic")
         lines = text.strip().split("\n")
         while lines and lines[0].lower().startswith(("here is", "here's", "sure", "certainly")):
             lines.pop(0)
@@ -1063,7 +1232,7 @@ Return valid JSON with keys: theme_used, sent_kanji, sent_furigana, sent_eng, ra
         raw_resp = ""
 
         while attempt <= MAX_RETRIES:
-            raw_resp = await self._call_gemini(conversation_history, system_instruction=system_instruction)
+            raw_resp = await self._call_gemini(conversation_history, system_instruction=system_instruction, task="sentence")
             clean_json = raw_resp.strip()
             if clean_json.startswith("```"):
                 clean_json = clean_json.split("\n", 1)[-1]
@@ -1213,4 +1382,4 @@ Return valid JSON with keys: theme_used, sent_kanji, sent_furigana, sent_eng, ra
             "parts": [{"text": user_message}]
         })
 
-        return await self._call_gemini(gemini_contents, system_instruction=system_instruction)
+        return await self._call_gemini(gemini_contents, system_instruction=system_instruction, task="tutor_chat")

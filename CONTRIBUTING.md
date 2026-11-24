@@ -42,7 +42,22 @@ pytest                    # unit tests (no Anki or API key needed)
 ruff check .              # lint
 pytest -m integration     # optional: needs Anki running and a real Gemini key; spends API quota
 ```
-Unit tests run against a temporary config (see `conftest.py`), so they never modify your `config.json`. CI runs `ruff check .` and `pytest` on every pull request.
+Unit tests run against a temporary config and database (see `conftest.py`), so they never modify your `config.json` or `leech_doctor.db`. CI runs `ruff check .` and `pytest` on every pull request.
+
+### 5. Database migrations
+
+`leech_doctor.db` is SQLite, mapped with SQLAlchemy 2.0 in [`db.py`](db.py); [Alembic](https://alembic.sqlalchemy.org/) owns the schema in [`migrations/`](migrations/). The app runs `alembic upgrade head` itself on startup. To change the schema:
+
+```bash
+# 1. Edit the models in db.py, then generate a migration and read it before committing
+alembic revision --autogenerate -m "add something"
+# 2. Apply it to your local database
+alembic upgrade head
+# 3. Confirm models and migrations agree (the test suite checks this too)
+alembic check
+```
+
+Migrations must not import app code (use plain `sa.DateTime()` and friends), and SQLite changes go through `op.batch_alter_table`.
 
 ---
 

@@ -20,11 +20,25 @@ from pydantic import BaseModel
 
 from anki_client import AnkiClient, JLPT_LEVELS, grammar_deck_name, normalize_jlpt_level
 from config_defaults import DEFAULT_CONFIG
-from gemini_client import GeminiClient
+from gemini_client import FALLBACK_MODELS, GeminiBusyError, GeminiClient, GeminiQuotaError, usage_report
 from rag_engine import MultiVectorRAG
 from utils import format_notes_for_anki
 
 logger = logging.getLogger(__name__)
+
+def http_error(e: Exception) -> HTTPException:
+    """Maps an exception to an HTTP error. Gemini being busy is 503 + Retry-After, which the
+    frontend retries with a spinner; running out of quota is a final 429."""
+    if isinstance(e, GeminiBusyError):
+        return HTTPException(
+            status_code=503,
+            detail="All available Gemini models are busy right now.",
+            headers={"Retry-After": str(e.retry_after)},
+        )
+    if isinstance(e, GeminiQuotaError):
+        return HTTPException(status_code=429, detail=str(e))
+    return HTTPException(status_code=500, detail=str(e))
+
 
 app = FastAPI(title="Anki Leech Doctor & Mnemonic Studio")
 
@@ -193,7 +207,7 @@ def get_decks():
         )
         return stats
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise http_error(e)
 
 @app.get("/api/cards")
 def get_cards(
@@ -214,14 +228,14 @@ def get_cards(
         )
         return {"count": len(cards), "cards": cards}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise http_error(e)
 
 @app.get("/api/rag/stats")
 async def get_rag_stats():
     try:
         return rag.get_stats()
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise http_error(e)
 
 @app.post("/api/rag/sync")
 async def sync_rag_index(req: Optional[RAGSyncRequest] = None):
@@ -248,7 +262,7 @@ async def sync_rag_index(req: Optional[RAGSyncRequest] = None):
         return res
     except Exception as e:
         logger.exception("Request failed")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise http_error(e)
 
 @app.post("/api/rag/search-similar")
 async def search_similar_cards(req: RAGSearchRequest):
@@ -263,7 +277,7 @@ async def search_similar_cards(req: RAGSearchRequest):
         )
         return {"count": len(matches), "matches": matches}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise http_error(e)
 
 @app.get("/api/card/{card_id}/details")
 async def get_card_details(
@@ -312,7 +326,19 @@ async def get_card_details(
             "confusableCards": confusable_cards
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise http_error(e)
+
+@app.get("/api/gemini/usage")
+def gemini_usage():
+    """Today's Gemini requests per model (quota day = since midnight Pacific), from the
+    call log, with each model's learned daily limit and current cooldown."""
+    try:
+        models = [gemini.model] + [m for m in FALLBACK_MODELS if m != gemini.model]
+        return usage_report(models)
+    except Exception as e:
+        logger.exception("Request failed")
+        raise http_error(e)
+
 
 @app.post("/api/generate-mnemonic")
 async def generate_mnemonic(req: MnemonicRequest):
@@ -344,7 +370,7 @@ async def generate_mnemonic(req: MnemonicRequest):
         return res
     except Exception as e:
         logger.exception("Request failed")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise http_error(e)
 
 @app.post("/api/generate-sentence")
 async def generate_sentence(req: SentenceRequest):
@@ -362,7 +388,7 @@ async def generate_sentence(req: SentenceRequest):
         return res
     except Exception as e:
         logger.exception("Request failed")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise http_error(e)
 
 @app.post("/api/chat")
 async def chat_tutor(req: ChatRequest):
@@ -391,7 +417,7 @@ async def chat_tutor(req: ChatRequest):
         )
         return {"reply": reply}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise http_error(e)
 
 @app.post("/api/sync/save-notes")
 async def save_notes(req: SaveNotesRequest):
@@ -400,7 +426,7 @@ async def save_notes(req: SaveNotesRequest):
         await asyncio.to_thread(anki.update_note_by_role, req.noteId, {"notes": formatted})
         return {"success": True, "notes": formatted, "message": "Card notes updated in Anki"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise http_error(e)
 
 @app.post("/api/sync/save-vocab")
 async def save_vocab(req: SaveVocabRequest):
@@ -429,7 +455,7 @@ async def save_vocab(req: SaveVocabRequest):
 
         return {"success": True, "message": "Vocabulary definition updated in Anki"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise http_error(e)
 
 @app.post("/api/sync/save-sentence")
 async def save_sentence(req: SaveSentenceRequest):
@@ -442,7 +468,7 @@ async def save_sentence(req: SaveSentenceRequest):
         })
         return {"success": True, "message": "Example sentence updated and SentAudio cleared in Anki"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise http_error(e)
 
 @app.post("/api/sync/unsuspend")
 def unsuspend_card(req: CardActionRequest):
@@ -450,7 +476,7 @@ def unsuspend_card(req: CardActionRequest):
         anki.unsuspend_and_unleech(req.cardId, req.noteId)
         return {"success": True, "message": "Card unsuspended and leech tag removed"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise http_error(e)
 
 @app.post("/api/sync/undo-unsuspend")
 def undo_unsuspend_card(req: CardActionRequest):
@@ -458,7 +484,7 @@ def undo_unsuspend_card(req: CardActionRequest):
         anki.resuspend_and_releech(req.cardId, req.noteId)
         return {"success": True, "message": "Card re-suspended and leech tag restored"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise http_error(e)
 
 @app.post("/api/sync/toggle-suspend")
 def toggle_suspend(req: CardActionRequest):
@@ -466,7 +492,7 @@ def toggle_suspend(req: CardActionRequest):
         anki.toggle_suspend(req.cardId, bool(req.suspend))
         return {"success": True, "suspended": req.suspend}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise http_error(e)
 
 @app.post("/api/card/delete")
 def delete_card_endpoint(req: DeleteCardRequest):
@@ -482,7 +508,7 @@ def delete_card_endpoint(req: DeleteCardRequest):
         return {"success": True, "message": "Card permanently deleted from Anki"}
     except Exception as e:
         logger.exception("Request failed")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise http_error(e)
 
 @app.post("/api/mining/analyze")
 async def analyze_mining_vocab(req: MiningAnalyzeRequest):
@@ -599,7 +625,7 @@ async def analyze_mining_vocab(req: MiningAnalyzeRequest):
         return draft_card
     except Exception as e:
         logger.exception("Request failed")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise http_error(e)
 
 def _ensure_rag_deck(deck_name: str) -> None:
     """Adds a newly used grammar deck to config.ragDecks so collision checks see it."""
@@ -639,7 +665,7 @@ async def create_mined_card(req: SaveMinedCardRequest):
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.exception("Adding mined card failed")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise http_error(e)
     # Index the new card so the collision radar sees it right away
     try:
         await rag.index_cards([{

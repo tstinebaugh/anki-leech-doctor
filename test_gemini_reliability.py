@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 
-from gemini_client import GeminiClient, model_health, thinking_config_for
+from gemini_client import FALLBACK_MODELS, GeminiBusyError, GeminiClient, GeminiQuotaError, model_health, thinking_config_for
 
 HELLO = [{"parts": [{"text": "hello"}]}]
 
@@ -69,7 +69,7 @@ async def test_success_clears_the_cooldown():
     client = _client()
     with patch("httpx.AsyncClient.post") as mock_post:
         # Every healthy model fails, so the cooling one is still tried as a last resort
-        mock_post.side_effect = [_err(503, "busy"), _err(503, "busy"), _ok("back")]
+        mock_post.side_effect = [_err(503, "busy")] * (len(FALLBACK_MODELS) - 1) + [_ok("back")]
         assert await client._call_gemini(HELLO) == "back"
         assert _models(mock_post)[-1] == "gemini-flash-latest"
     assert model_health.cooldown_left("gemini-flash-latest") == 0
@@ -179,8 +179,8 @@ async def test_used_up_daily_quota_blocks_the_model_until_reset():
 
         mock_post.reset_mock()
         # Even when every other model fails, the blocked one is not asked again
-        mock_post.side_effect = [_err(503, "busy"), _err(503, "busy")]
-        with pytest.raises(RuntimeError) as exc:
+        mock_post.side_effect = [_err(503, "busy")] * (len(FALLBACK_MODELS) - 1)
+        with pytest.raises(GeminiBusyError) as exc:
             await client._call_gemini(HELLO)
         assert "gemini-flash-latest" not in _models(mock_post)
         assert "daily quota used up" in str(exc.value)
@@ -206,38 +206,98 @@ def test_quota_reset_is_midnight_pacific():
 
 @pytest.mark.anyio
 async def test_all_models_blocked_fails_without_any_request():
-    for m in ["gemini-flash-latest", "gemini-3-flash-preview", "gemini-flash-lite-latest"]:
+    for m in ["gemini-flash-latest", *FALLBACK_MODELS]:
         model_health.failed(m, retry_after=3600, hard=True, reason="daily quota used up")
     client = _client()
     with patch("httpx.AsyncClient.post") as mock_post:
-        with pytest.raises(RuntimeError, match="out of quota") as exc:
+        with pytest.raises(GeminiQuotaError, match="out of quota") as exc:
             await client._call_gemini(HELLO)
         assert mock_post.call_count == 0
     assert "can be used again until" in str(exc.value)
 
 
+def _fresh_db(tmp_path):
+    from db import Database
+    database = Database(f"sqlite:///{tmp_path / 'test.db'}")
+    database.migrate()
+    return database
+
+
 def test_cooldowns_survive_a_restart(tmp_path):
     from gemini_client import ModelHealth
-    path = str(tmp_path / "health.json")
-    first = ModelHealth(path)
+    database = _fresh_db(tmp_path)
+    first = ModelHealth(database)
     first.failed("gemini-flash-latest", retry_after=3600, hard=True, reason="daily quota used up")
     first.failed("gemini-3-flash-preview", retry_after=5, reason="rate limited")
 
-    second = ModelHealth(path)  # e.g. after uvicorn --reload
+    second = ModelHealth(database)  # e.g. after uvicorn --reload: nothing in memory
     assert second.is_blocked("gemini-flash-latest")
     assert second.reason("gemini-flash-latest") == "daily quota used up"
     assert 3590 < second.cooldown_left("gemini-flash-latest") <= 3600
 
     second.succeeded("gemini-flash-latest")
-    assert not ModelHealth(path).is_blocked("gemini-flash-latest")
+    assert not ModelHealth(database).is_blocked("gemini-flash-latest")
 
 
-def test_expired_and_broken_cooldown_files_are_ignored(tmp_path):
-    import json
-    import time
+def test_expired_cooldowns_are_ignored(tmp_path):
+    from datetime import datetime, timedelta, timezone
     from gemini_client import ModelHealth
-    path = tmp_path / "health.json"
-    path.write_text(json.dumps({"gemini-flash-latest": {"until": time.time() - 1, "hard": True}}))
-    assert not ModelHealth(str(path)).cooldown_left("gemini-flash-latest")
-    path.write_text("{not json")
-    assert ModelHealth(str(path)).order(["gemini-flash-latest"]) == (["gemini-flash-latest"], [])
+    database = _fresh_db(tmp_path)
+    database.save_cooldown("gemini-flash-latest", until=datetime.now(timezone.utc) - timedelta(seconds=1),
+                           hard=True, reason="old", strikes=1)
+    health = ModelHealth(database)
+    assert not health.cooldown_left("gemini-flash-latest")
+    assert health.order(["gemini-flash-latest"]) == (["gemini-flash-latest"], [])
+
+
+@pytest.mark.anyio
+async def test_overloaded_everywhere_is_reported_as_busy():
+    client = _client()
+    with patch("httpx.AsyncClient.post") as mock_post:
+        mock_post.return_value = _err(503, "high demand")
+        with pytest.raises(GeminiBusyError) as exc:
+            await client._call_gemini(HELLO)
+    assert exc.value.retry_after > 0
+
+
+@pytest.mark.anyio
+async def test_quota_plus_overload_is_busy_and_retry_skips_the_quota_models():
+    """The case from the logs: two models out of daily quota, the rest overloaded."""
+    client = _client()
+    quota = _err(429, "You exceeded your current quota", DAILY_QUOTA)
+    with patch("httpx.AsyncClient.post") as mock_post:
+        mock_post.side_effect = [quota, quota] + [_err(503, "high demand")] * (len(FALLBACK_MODELS) - 1)
+        with pytest.raises(GeminiBusyError):
+            await client._call_gemini(HELLO)
+        blocked = _models(mock_post)[:2]
+
+        # The retry the frontend makes a few seconds later only asks the overloaded ones
+        mock_post.reset_mock()
+        mock_post.side_effect = [_ok("finally")]
+        assert await client._call_gemini(HELLO) == "finally"
+        assert _models(mock_post)[0] not in blocked
+
+
+@pytest.mark.anyio
+async def test_other_failures_are_not_retryable():
+    client = _client()
+    with patch("httpx.AsyncClient.post") as mock_post:
+        mock_post.return_value = _err(400, "Invalid argument")
+        with pytest.raises(RuntimeError) as exc:
+            await client._call_gemini(HELLO)
+    assert not isinstance(exc.value, GeminiBusyError)
+
+
+def test_busy_and_quota_errors_map_to_retryable_http_statuses():
+    from fastapi.testclient import TestClient
+    import app as app_module
+
+    client = TestClient(app_module.app)
+    payload = {"vocabKanji": "避難", "vocabFurigana": "ひなん", "vocabDef": "evacuation", "kanjiDetails": {}, "confusableCards": []}
+    with patch.object(app_module.gemini, "generate_mnemonic", side_effect=GeminiBusyError("all busy", retry_after=7)):
+        res = client.post("/api/generate-mnemonic", json=payload)
+    assert res.status_code == 503 and res.headers["Retry-After"] == "7"
+
+    with patch.object(app_module.gemini, "generate_mnemonic", side_effect=GeminiQuotaError("out of quota until 17:00", 0)):
+        res = client.post("/api/generate-mnemonic", json=payload)
+    assert res.status_code == 429 and "17:00" in res.json()["detail"]

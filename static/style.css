@@ -2082,6 +2082,21 @@ body {
 .toast-info {
   border-left: 4px solid var(--accent-primary);
 }
+.toast-retry {
+  border-left: 4px solid var(--accent-amber);
+}
+.retry-spinner {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  border: 2px solid rgba(245, 158, 11, 0.25);
+  border-top-color: var(--accent-amber);
+  border-radius: 50%;
+  animation: cardsSpin 0.8s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .retry-spinner { animation-duration: 2.4s; }
+}
 
 .toast-action-btn {
   background: rgba(245, 158, 11, 0.2);
@@ -3801,4 +3816,58 @@ body {
 @keyframes cardsSpin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) {
   .cards-loading-spinner { animation-duration: 2s; }
+}
+
+/* ---- Gemini usage table (Settings) ---- */
+.usage-table-wrap {
+  margin-top: 0.6rem;
+  overflow-x: auto;
+}
+.usage-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+}
+.usage-table th,
+.usage-table td {
+  padding: 0.45rem 0.5rem;
+  border-bottom: 1px solid var(--border-subtle);
+  text-align: left;
+  vertical-align: top;
+}
+.usage-table th {
+  color: var(--text-muted, #94a3b8);
+  font-weight: 600;
+}
+.usage-table .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.usage-table code {
+  font-size: 0.78rem;
+}
+.usage-bar {
+  height: 4px;
+  margin-top: 4px;
+  border-radius: 2px;
+  background: rgba(148, 163, 184, 0.2);
+  overflow: hidden;
+}
+.usage-bar span {
+  display: block;
+  height: 100%;
+  background: var(--accent-primary);
+}
+.usage-status {
+  font-weight: 600;
+  white-space: nowrap;
+}
+.usage-ok { color: var(--accent-emerald); }
+.usage-cooling { color: var(--accent-amber); }
+.usage-blocked { color: var(--accent-rose); }
+.usage-detail {
+  color: var(--text-muted, #94a3b8);
+  font-size: 0.72rem;
+  margin-top: 2px;
 }
