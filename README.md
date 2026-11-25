@@ -276,7 +276,7 @@ All settings are stored locally in `config.json` (git-ignored). Only the keys yo
 | `ragExcludeSuspended` | `bool` | Skip suspended cards when indexing. |
 | `persona` | `string` | Your background and interests, used to personalise stories. |
 | `openaiCompatBaseUrl` | `string` | Optional. Base URL of an OpenAI-compatible chat API asked when every Gemini model has failed, e.g. `https://integrate.api.nvidia.com/v1`. Empty = off. |
-| `openaiCompatModel` | `string` | Optional. That provider's model ID, e.g. `meta/llama-3.3-70b-instruct`. Empty = off. |
+| `openaiCompatModel` | `string` | Optional. That provider's model ID, e.g. `minimaxai/minimax-m3.1-flash`. Empty = off. |
 | `openaiCompatApiKey` | `string` | Optional. Sent as `Authorization: Bearer <key>`; not needed for a local server. Shown masked in Settings and never logged. |
 
 ### 🛟 Fallback provider (NVIDIA NIM, OpenRouter or Ollama)
@@ -285,12 +285,12 @@ On busy evenings every Gemini model can be out of quota or overloaded at the sam
 
 | Provider | `openaiCompatBaseUrl` | `openaiCompatModel` (example) | Key |
 | :--- | :--- | :--- | :--- |
-| [NVIDIA NIM](https://build.nvidia.com/) | `https://integrate.api.nvidia.com/v1` | `meta/llama-3.3-70b-instruct` | Free `nvapi-...` key from build.nvidia.com (rate limited to about 40 requests a minute). |
+| [NVIDIA NIM](https://build.nvidia.com/) | `https://integrate.api.nvidia.com/v1` | `minimaxai/minimax-m3.1-flash` | Free `nvapi-...` key from build.nvidia.com (rate limited to about 40 requests a minute). |
 | [OpenRouter](https://openrouter.ai/) | `https://openrouter.ai/api/v1` | any model ID ending in `:free` | `sk-or-...` key from openrouter.ai/keys. Free models have a small daily request limit. |
 | [Ollama](https://ollama.com/) (local) | `http://localhost:11434/v1` | `qwen2.5:14b` | None. Run `ollama pull qwen2.5:14b` first; a 14B model fits in 16–18 GB of RAM. |
 | [LM Studio](https://lmstudio.ai/) (local) | `http://localhost:1234/v1` | the model ID LM Studio shows | None. Start its local server first. |
 
-Remote providers get 60s to answer and a server on `localhost` gets 5 minutes, since a local 14B model on a laptop is slow. The provider gets the same cooldowns as a Gemini model: after an overload (5xx), a timeout or a 429 without `Retry-After` it is skipped for 1 to 10 minutes unless nothing else is left; after a 429 with `Retry-After` it is not asked until that time. Its calls are logged as `openai:<model>`, so it shows in **Gemini Usage Today**, the performance dashboard and the fallback order. Pick a model that handles Japanese well: smaller local models are more likely to get furigana wrong. With Ollama, give long prompts room by starting it with `OLLAMA_CONTEXT_LENGTH=8192 ollama serve`.
+Remote providers get 60s to answer and a server on `localhost` gets 5 minutes, since a local 14B model on a laptop is slow. The provider gets the same cooldowns as a Gemini model: after an overload (5xx), a timeout or a 429 without `Retry-After` it is skipped for 1 to 10 minutes unless nothing else is left; after a 429 with `Retry-After` it is not asked until that time. Its calls are logged as `openai:<model>`, so it shows in **Gemini Usage Today**, the performance dashboard and the fallback order. Pick a model that handles Japanese well: smaller local models are more likely to get furigana wrong. NVIDIA's free catalog changes; list what your key can use with `curl -s https://integrate.api.nvidia.com/v1/models -H "Authorization: Bearer $NVIDIA_API_KEY"`. In a test in November 2026, `minimaxai/minimax-m3.1-flash` and `nvidia/nemotron-3-ultra-550b-a55b` produced valid furigana sentences in 15–40s; larger "pro" models often ran past the 60s timeout. With Ollama, give long prompts room by starting it with `OLLAMA_CONTEXT_LENGTH=8192 ollama serve`.
 
 ### Environment variables
 
