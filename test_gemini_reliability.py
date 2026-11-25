@@ -301,3 +301,25 @@ def test_busy_and_quota_errors_map_to_retryable_http_statuses():
     with patch.object(app_module.gemini, "generate_mnemonic", side_effect=GeminiQuotaError("out of quota until 17:00", 0)):
         res = client.post("/api/generate-mnemonic", json=payload)
     assert res.status_code == 429 and "17:00" in res.json()["detail"]
+
+
+def test_busy_errors_are_logged_without_a_traceback(caplog):
+    """'All models busy' is expected and retried by the frontend; only real errors get a traceback."""
+    import logging
+    from fastapi.testclient import TestClient
+    import app as app_module
+
+    client = TestClient(app_module.app)
+    payload = {"vocabKanji": "避難", "vocabFurigana": "ひなん", "vocabDef": "evacuation", "kanjiDetails": {}, "confusableCards": []}
+    with caplog.at_level(logging.WARNING, logger="app"):
+        with patch.object(app_module.gemini, "generate_mnemonic", side_effect=GeminiBusyError("all busy", retry_after=7)):
+            client.post("/api/generate-mnemonic", json=payload)
+        with patch.object(app_module.gemini, "generate_mnemonic", side_effect=GeminiQuotaError("out of quota", 0)):
+            client.post("/api/generate-mnemonic", json=payload)
+    assert [(r.levelname, r.exc_info) for r in caplog.records] == [("WARNING", None), ("WARNING", None)]
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="app"):
+        with patch.object(app_module.gemini, "generate_mnemonic", side_effect=RuntimeError("boom")):
+            assert client.post("/api/generate-mnemonic", json=payload).status_code == 500
+    assert [r.levelname for r in caplog.records] == ["ERROR"] and caplog.records[0].exc_info

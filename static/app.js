@@ -538,6 +538,81 @@ async function loadGeminiPerformance(range = geminiPerfRange) {
   }
 }
 
+// ---- Debug: Gemini model list & fallback order (Settings) --------------------------------
+const MODEL_STATUS_LABELS = { duplicate: "Skipped: same model", missing: "Skipped: removed" };
+
+async function loadGeminiModels(request = fetch("/api/gemini/models")) {
+  const body = document.getElementById("gemini-models-body");
+  if (!body) return;
+  try {
+    const res = await request;
+    if (!res.ok) throw new Error((await res.json()).detail || "Could not load the model list");
+    renderGeminiModels(body, await res.json());
+  } catch (err) {
+    body.innerHTML = `<p class="form-help">Model list unavailable: ${escapeHtml(err.message)}</p>`;
+  }
+}
+
+function renderGeminiModels(body, data) {
+  const fetched = data.fetchedAt
+    ? `Model list fetched ${escapeHtml(fmtWhen(data.fetchedAt))}${data.stale ? " (out of date)" : ""}, refreshed every ${data.maxAgeDays} days.`
+    : "Gemini's model list hasn't been fetched yet (needs an API key).";
+  let n = 0;
+  const rows = data.order.map((m) => {
+    const used = m.status === "try";
+    const rate = m.successRate == null ? null : Math.round(m.successRate * 100);
+    const rateClass = rate == null ? "" : rate >= 80 ? "good" : rate >= 50 ? "warn" : "bad";
+    const alias = m.resolvesTo ? `<div class="perf-sub">→ <code>${escapeHtml(m.resolvesTo)}</code></div>` : "";
+    const badge = m.role === "configured"
+      ? '<span class="perf-badge">Your model</span>'
+      : used ? "" : `<span class="perf-badge perf-badge-muted">${escapeHtml(MODEL_STATUS_LABELS[m.status] || m.status)}</span>`;
+    const note = m.note ? `<div class="perf-sub">${escapeHtml(m.note)}</div>` : "";
+    const action = m.role === "fallback"
+      ? `<button type="button" class="btn-tiny model-toggle" data-model="${escapeHtml(m.model)}" data-include="0">Remove</button>`
+      : "";
+    return `<tr class="${used ? "" : "model-row-skipped"}">
+      <td class="num">${used ? ++n : "–"}</td>
+      <td><code>${escapeHtml(m.model)}</code>${badge}${alias}${note}</td>
+      <td class="num">${m.calls ? fmtSeconds(m.expectedMs) : '<span class="perf-sub">no data</span>'}</td>
+      <td class="num">${rate == null ? "–" : `<span class="perf-rate perf-rate-${rateClass}">${rate}%</span><div class="perf-sub">${m.ok}/${m.calls}</div>`}</td>
+      <td class="num">${fmtSeconds(m.medianMs)}</td>
+      <td>${action}</td>
+    </tr>`;
+  }).join("");
+  const candidates = data.candidates.map((c) => `<li>
+      <code>${escapeHtml(c.model)}</code>${c.isNew ? '<span class="perf-badge">New</span>' : ""}
+      ${c.resolvesTo ? `<span class="perf-sub">→ <code>${escapeHtml(c.resolvesTo)}</code></span>` : ""}
+      <span class="perf-sub">${escapeHtml(c.displayName || "")}</span>
+      <button type="button" class="btn-tiny model-toggle" data-model="${escapeHtml(c.model)}" data-include="1">Add</button>
+    </li>`).join("");
+  body.innerHTML = `
+    <div class="model-catalog-meta">
+      <span class="perf-sub">${fetched}</span>
+      <button type="button" class="btn-ghost-sm" id="btn-refresh-models">↻ Refresh now</button>
+    </div>
+    <div class="usage-table-wrap">
+      <table class="usage-table perf-table model-order">
+        <thead><tr>
+          <th class="num">#</th><th>Model</th><th class="num" title="Average time per answer over the last ${data.windowDays} days, including time lost to failed attempts">Per answer</th>
+          <th class="num">Success</th><th class="num">Median</th><th></th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+    ${candidates
+      ? `<div class="perf-fail-title">Other text Flash models you could add</div><ul class="perf-failures model-candidates">${candidates}</ul>`
+      : ""}`;
+}
+
+async function toggleFallbackModel(model, include) {
+  await loadGeminiModels(fetch("/api/gemini/fallbacks", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model, include }),
+  }));
+  loadGeminiUsage();
+}
+
 // Convert bracket furigana syntax (e.g. 来週[らいしゅう]の 社員[しゃいん]) to HTML Ruby
 function parseFuriganaRuby(text) {
   if (!text) return "";
@@ -3522,6 +3597,21 @@ function setupEventListeners() {
     perfSection.querySelectorAll(".perf-range").forEach((b) =>
       b.addEventListener("click", () => loadGeminiPerformance(b.dataset.range)));
   }
+  const modelsSection = document.getElementById("gemini-models");
+  if (modelsSection) {
+    modelsSection.addEventListener("toggle", () => { if (modelsSection.open) loadGeminiModels(); });
+    modelsSection.addEventListener("click", (e) => {
+      const toggle = e.target.closest(".model-toggle");
+      if (toggle) {
+        toggle.disabled = true;
+        toggleFallbackModel(toggle.dataset.model, toggle.dataset.include === "1");
+      } else if (e.target.closest("#btn-refresh-models")) {
+        e.target.disabled = true;
+        e.target.textContent = "Refreshing…";
+        loadGeminiModels(fetch("/api/gemini/models/refresh", { method: "POST" }));
+      }
+    });
+  }
   // A different word or card type needs a fresh duplicate check
   if (el.miningInputVocab) el.miningInputVocab.addEventListener("input", resetMiningDuplicates);
   document.querySelectorAll(".btn-mining-type").forEach((b) => b.addEventListener("click", resetMiningDuplicates));
@@ -3570,6 +3660,8 @@ function setupEventListeners() {
     loadGeminiUsage();
     const perf = document.getElementById("gemini-perf");
     if (perf && perf.open) loadGeminiPerformance();
+    const models = document.getElementById("gemini-models");
+    if (models && models.open) loadGeminiModels();
   });
   el.btnCloseSettings.addEventListener("click", () => {
     el.settingsModal.classList.add("hidden");

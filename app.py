@@ -20,23 +20,30 @@ from pydantic import BaseModel
 
 from anki_client import AnkiClient, JLPT_LEVELS, grammar_deck_name, normalize_jlpt_level
 from config_defaults import DEFAULT_CONFIG
-from gemini_client import FALLBACK_MODELS, GeminiBusyError, GeminiClient, GeminiQuotaError, performance_report, usage_report
+import model_catalog
+from gemini_client import GeminiBusyError, GeminiClient, GeminiQuotaError, model_health, performance_report, usage_report
 from rag_engine import MultiVectorRAG
 from utils import format_notes_for_anki
 
 logger = logging.getLogger(__name__)
 
 def http_error(e: Exception) -> HTTPException:
-    """Maps an exception to an HTTP error. Gemini being busy is 503 + Retry-After, which the
-    frontend retries with a spinner; running out of quota is a final 429."""
+    """Logs an exception and maps it to an HTTP error. Call it from an `except` block.
+
+    Gemini being busy is 503 + Retry-After, which the frontend retries with a spinner, and
+    running out of quota is a final 429. Both are expected, so they get one log line (the
+    per-model details are already logged by the Gemini client) instead of a traceback."""
     if isinstance(e, GeminiBusyError):
+        logger.warning(f"All Gemini models busy; the app will retry in {e.retry_after}s")
         return HTTPException(
             status_code=503,
             detail="All available Gemini models are busy right now.",
             headers={"Retry-After": str(e.retry_after)},
         )
     if isinstance(e, GeminiQuotaError):
+        logger.warning(f"No Gemini model has quota left: {e}")
         return HTTPException(status_code=429, detail=str(e))
+    logger.exception("Request failed")
     return HTTPException(status_code=500, detail=str(e))
 
 
@@ -267,7 +274,6 @@ async def sync_rag_index(req: Optional[RAGSyncRequest] = None):
         res = await rag.index_cards(cards)
         return res
     except Exception as e:
-        logger.exception("Request failed")
         raise http_error(e)
 
 @app.post("/api/rag/search-similar")
@@ -353,7 +359,6 @@ def gemini_stats(range: str = "week"):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.exception("Request failed")
         raise http_error(e)
 
 
@@ -362,11 +367,54 @@ def gemini_usage():
     """Today's Gemini requests per model (quota day = since midnight Pacific), from the
     call log, with each model's learned daily limit and current cooldown."""
     try:
-        models = [gemini.model] + [m for m in FALLBACK_MODELS if m != gemini.model]
-        return usage_report(models)
+        return usage_report(gemini.candidate_models())
     except Exception as e:
-        logger.exception("Request failed")
         raise http_error(e)
+
+
+class FallbackToggleRequest(BaseModel):
+    model: str
+    include: bool
+
+
+def _catalog_report() -> Dict[str, Any]:
+    return model_catalog.catalog_report(gemini.model, gemini.fallback_models, model_health.db)
+
+
+@app.get("/api/gemini/models")
+async def gemini_models():
+    """Gemini's model list (fetched again when over a week old), where each alias points,
+    and the order fallback models are tried in, for the debug section in Settings."""
+    try:
+        await model_catalog.refresh_catalog(gemini.api_key, model_health.db)
+        return _catalog_report()
+    except Exception as e:
+        raise http_error(e)
+
+
+@app.post("/api/gemini/models/refresh")
+async def gemini_models_refresh():
+    """Fetches Gemini's model list now instead of waiting for the weekly refresh."""
+    if not gemini.api_key:
+        raise HTTPException(status_code=400, detail="Set a Gemini API key first.")
+    if not await model_catalog.refresh_catalog(gemini.api_key, model_health.db, force=True):
+        raise HTTPException(status_code=502, detail="Could not fetch the model list from Gemini; see the server log.")
+    return _catalog_report()
+
+
+@app.post("/api/gemini/fallbacks")
+def gemini_fallbacks(req: FallbackToggleRequest):
+    """Adds a model to, or removes it from, the fallback list (config key fallbackModels)."""
+    model = req.model.strip()
+    if not re.fullmatch(r"[\w.-]{1,100}", model):
+        raise HTTPException(status_code=400, detail="Not a valid model name.")
+    models = [m for m in gemini.fallback_models if m != model]
+    if req.include:
+        models.append(model)
+    if not models:
+        raise HTTPException(status_code=400, detail="Keep at least one fallback model.")
+    gemini.save_config({"fallbackModels": models})
+    return _catalog_report()
 
 
 @app.post("/api/generate-mnemonic")
@@ -398,7 +446,6 @@ async def generate_mnemonic(req: MnemonicRequest):
         )
         return res
     except Exception as e:
-        logger.exception("Request failed")
         raise http_error(e)
 
 @app.post("/api/generate-sentence")
@@ -416,7 +463,6 @@ async def generate_sentence(req: SentenceRequest):
         )
         return res
     except Exception as e:
-        logger.exception("Request failed")
         raise http_error(e)
 
 @app.post("/api/chat")
@@ -536,7 +582,6 @@ def delete_card_endpoint(req: DeleteCardRequest):
                 logger.warning(f"Error removing card {req.cardId} from RAG: {e}")
         return {"success": True, "message": "Card permanently deleted from Anki"}
     except Exception as e:
-        logger.exception("Request failed")
         raise http_error(e)
 
 @app.post("/api/mining/analyze")
@@ -665,7 +710,6 @@ async def analyze_mining_vocab(req: MiningAnalyzeRequest):
         }
         return draft_card
     except Exception as e:
-        logger.exception("Request failed")
         raise http_error(e)
 
 def _ensure_rag_deck(deck_name: str) -> None:
@@ -705,7 +749,6 @@ async def create_mined_card(req: SaveMinedCardRequest):
         # Setup problem the user can fix (note type missing, fields don't match)
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.exception("Adding mined card failed")
         raise http_error(e)
     # Index the new card so the collision radar sees it right away
     try:

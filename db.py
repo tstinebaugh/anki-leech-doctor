@@ -67,6 +67,9 @@ class GeminiCall(Base):
     output_tokens: Mapped[Optional[int]]
     thought_tokens: Mapped[Optional[int]]
     error: Mapped[Optional[str]] = mapped_column(Text)
+    # The model that actually served the request, when Google says: the reply's modelVersion,
+    # or the model named in a quota error. Shows where aliases such as gemini-flash-latest point.
+    model_version: Mapped[Optional[str]] = mapped_column(String(100))
 
     __table_args__ = (
         Index("ix_gemini_calls_started_at", "started_at"),  # usage by day
@@ -96,6 +99,23 @@ class ModelQuota(Base):
     learned_at: Mapped[datetime] = mapped_column(UTCDateTime())
 
 
+class GeminiModel(Base):
+    """A model from Gemini's model list (GET /v1beta/models) that supports generateContent.
+
+    The list is fetched about once a week (model_catalog.py). A model the latest fetch
+    didn't return keeps its old last_seen_at, which is how removed models are spotted."""
+
+    __tablename__ = "gemini_models"
+
+    name: Mapped[str] = mapped_column(String(100), primary_key=True)
+    display_name: Mapped[str] = mapped_column(String(200), default="")
+    version: Mapped[Optional[str]] = mapped_column(String(100))
+    output_token_limit: Mapped[Optional[int]]
+    thinking: Mapped[Optional[bool]]
+    first_seen_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    last_seen_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
 @dataclass
 class ModelUsage:
     model: str
@@ -122,6 +142,7 @@ class ModelStats:
     p90_ms: Optional[int] = None
     fastest_ms: Optional[int] = None
     ms_lost: int = 0        # time spent waiting on attempts that failed
+    ms_ok: int = 0          # time spent on attempts that answered
     avg_tokens: Optional[int] = None
     last_used: Optional[datetime] = None
 
@@ -211,6 +232,7 @@ class Database:
                 count(c.outcome == "timeout"),
                 count(c.outcome.in_(("quota", "rate_limited"))),
                 func.sum(case((c.outcome != "ok", c.latency_ms), else_=0)),
+                func.sum(case((c.outcome == "ok", c.latency_ms), else_=0)),
                 func.avg(case((c.outcome == "ok", tokens))),
                 func.max(c.started_at),
             )
@@ -225,7 +247,7 @@ class Database:
                 by_model.setdefault(model, []).append(ms)
 
         stats = []
-        for model, calls, ok, overloaded, timeouts, quota, ms_lost, avg_tokens, last_used in rows:
+        for model, calls, ok, overloaded, timeouts, quota, ms_lost, ms_ok, avg_tokens, last_used in rows:
             ms = sorted(by_model.get(model, []))
             stats.append(ModelStats(
                 model=model, calls=calls, ok=ok, overloaded=overloaded, timeouts=timeouts, quota=quota,
@@ -234,6 +256,7 @@ class Database:
                 p90_ms=_percentile(ms, 0.9),
                 fastest_ms=ms[0] if ms else None,
                 ms_lost=int(ms_lost or 0),
+                ms_ok=int(ms_ok or 0),
                 avg_tokens=int(avg_tokens) if avg_tokens is not None else None,
                 # SQLite's max() returns the stored text, not a datetime
                 last_used=_parse_utc(last_used),
@@ -250,6 +273,46 @@ class Database:
     def recent_calls(self, limit: int = 20) -> List[GeminiCall]:
         with self.Session() as s:
             return list(s.execute(select(GeminiCall).order_by(GeminiCall.id.desc()).limit(limit)).scalars())
+
+    def resolved_versions(self, since: Optional[datetime] = None) -> Dict[str, str]:
+        """The model each requested name was last served by, e.g. {"gemini-flash-latest": "gemini-3.8-flash"}."""
+        query = select(GeminiCall.model, GeminiCall.model_version).where(GeminiCall.model_version.is_not(None))
+        if since:
+            query = query.where(GeminiCall.started_at >= since)
+        with self.Session() as s:
+            return {model: version for model, version in s.execute(query.order_by(GeminiCall.id))}
+
+    def models_not_found(self, since: Optional[datetime] = None) -> set:
+        """Models whose most recent call got a 404: retired, or no longer offered to this
+        key (gemini-2.5-flash is still in the model list but "not available to new users")."""
+        query = select(GeminiCall.model, GeminiCall.outcome)
+        if since:
+            query = query.where(GeminiCall.started_at >= since)
+        with self.Session() as s:
+            latest = {model: outcome for model, outcome in s.execute(query.order_by(GeminiCall.id))}
+        return {model for model, outcome in latest.items() if outcome == "not_found"}
+
+    # ---- model catalog -----------------------------------------------------------------
+
+    def save_catalog(self, models: List[Dict], seen_at: Optional[datetime] = None) -> None:
+        """Upserts the models from one fetch of Gemini's model list."""
+        seen_at = seen_at or utcnow()
+        with self.Session.begin() as s:
+            known = {m.name: m for m in s.execute(select(GeminiModel)).scalars()}
+            for m in models:
+                row = known.get(m["name"])
+                if row is None:
+                    row = GeminiModel(name=m["name"], first_seen_at=seen_at)
+                    s.add(row)
+                row.display_name = m.get("display_name") or ""
+                row.version = m.get("version")
+                row.output_token_limit = m.get("output_token_limit")
+                row.thinking = m.get("thinking")
+                row.last_seen_at = seen_at
+
+    def catalog(self) -> List[GeminiModel]:
+        with self.Session() as s:
+            return list(s.execute(select(GeminiModel).order_by(GeminiModel.name)).scalars())
 
     # ---- quotas ------------------------------------------------------------------------
 
@@ -278,7 +341,7 @@ class Database:
     def clear(self) -> None:
         """Empties every table (used by tests)."""
         with self.Session.begin() as s:
-            for table in (GeminiCall, ModelCooldown, ModelQuota):
+            for table in (GeminiCall, ModelCooldown, ModelQuota, GeminiModel):
                 s.execute(delete(table))
 
 
