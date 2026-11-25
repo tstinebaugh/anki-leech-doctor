@@ -11,6 +11,7 @@ import logging
 import os
 import re
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
@@ -21,7 +22,10 @@ from pydantic import BaseModel
 from anki_client import AnkiClient, JLPT_LEVELS, grammar_deck_name, normalize_jlpt_level
 from config_defaults import DEFAULT_CONFIG
 import model_catalog
-from gemini_client import GeminiBusyError, GeminiClient, GeminiQuotaError, model_health, performance_report, usage_report
+from gemini_client import (
+    GeminiBusyError, GeminiClient, GeminiQuotaError, list_openai_compat_models, model_health, performance_report,
+    usage_report,
+)
 from rag_engine import MultiVectorRAG
 from utils import format_notes_for_anki
 
@@ -112,6 +116,12 @@ class RAGSyncRequest(BaseModel):
 
 class ConfigUpdateRequest(BaseModel):
     apiKey: Optional[str] = None
+    # OpenAI-compatible fallback provider (NVIDIA NIM, OpenRouter, Ollama...). An empty
+    # base URL or model turns it off; an empty key keeps the saved one (clearOpenaiCompatApiKey removes it).
+    openaiCompatBaseUrl: Optional[str] = None
+    openaiCompatApiKey: Optional[str] = None
+    clearOpenaiCompatApiKey: Optional[bool] = None
+    openaiCompatModel: Optional[str] = None
     model: Optional[str] = None
     persona: Optional[str] = None
     mnemonicTone: Optional[str] = None
@@ -367,7 +377,7 @@ def gemini_usage():
     """Today's Gemini requests per model (quota day = since midnight Pacific), from the
     call log, with each model's learned daily limit and current cooldown."""
     try:
-        return usage_report(gemini.candidate_models())
+        return usage_report(gemini.candidate_models() + _providers())
     except Exception as e:
         raise http_error(e)
 
@@ -377,8 +387,13 @@ class FallbackToggleRequest(BaseModel):
     include: bool
 
 
+def _providers() -> List[str]:
+    """The OpenAI-compatible fallback's call-log name, when it is configured."""
+    return [gemini.openai_compat_name] if gemini.openai_compat_name else []
+
+
 def _catalog_report() -> Dict[str, Any]:
-    return model_catalog.catalog_report(gemini.model, gemini.fallback_models, model_health.db)
+    return model_catalog.catalog_report(gemini.model, gemini.fallback_models, model_health.db, _providers())
 
 
 @app.get("/api/gemini/models")
@@ -415,6 +430,45 @@ def gemini_fallbacks(req: FallbackToggleRequest):
         raise HTTPException(status_code=400, detail="Keep at least one fallback model.")
     gemini.save_config({"fallbackModels": models})
     return _catalog_report()
+
+
+class ProviderModelsRequest(BaseModel):
+    # Values typed in Settings but not saved yet; empty means the saved (or env) value
+    baseUrl: Optional[str] = None
+    apiKey: Optional[str] = None
+
+
+@app.post("/api/fallback-provider/models")
+async def fallback_provider_models(req: ProviderModelsRequest):
+    """Chat models the OpenAI-compatible fallback provider offers, for the Settings dropdown,
+    with how each has done as the fallback over the last week (from the call log)."""
+    saved_base = gemini.openai_compat_base_url
+    base = (req.baseUrl or "").strip().rstrip("/") or saved_base
+    if not base:
+        raise HTTPException(status_code=400, detail="Set the fallback provider's base URL first.")
+    if not re.match(r"https?://[^\s/]+", base):
+        raise HTTPException(status_code=400, detail="The fallback provider URL must start with http:// or https://")
+    key = (req.apiKey or "").strip()
+    if not key and base == saved_base:
+        key = gemini.openai_compat_api_key  # never send a saved key to a different URL
+    try:
+        models = await list_openai_compat_models(base, key)
+    except RuntimeError as e:
+        logger.warning(f"Could not list the fallback provider's models: {e}")
+        raise HTTPException(status_code=502, detail=str(e))
+    since = datetime.now(timezone.utc) - timedelta(days=7)
+    stats = {st.model: st for st in model_health.db.model_stats(since)} if model_health.db else {}
+
+    def describe(model_id: str) -> Dict[str, Any]:
+        st = stats.get(f"{model_catalog.PROVIDER_PREFIX}{model_id}"[:100])
+        return {
+            "id": model_id,
+            "calls": st.calls if st else 0,
+            "ok": st.ok if st else 0,
+            "medianMs": st.median_ms if st else None,
+        }
+
+    return {"baseUrl": base, "selected": gemini.openai_compat_model, "models": [describe(m) for m in models]}
 
 
 @app.post("/api/generate-mnemonic")
@@ -771,15 +825,26 @@ async def create_mined_card(req: SaveMinedCardRequest):
 
     return {"success": True, "card": created_card, "message": f"Added to {created_card['deckName']}"}
 
+def _mask(key: str) -> str:
+    return (key[:6] + "..." + key[-4:]) if len(key) > 10 else ("***" if key else "")
+
+
 @app.get("/api/config")
 async def get_config():
     cfg = gemini.load_config()
     key = cfg.get("apiKey", "")
-    masked_key = (key[:6] + "..." + key[-4:]) if len(key) > 10 else ("***" if key else "")
     rag_stats = rag.get_stats()
     return {
         "hasKey": bool(key),
-        "maskedKey": masked_key,
+        "maskedKey": _mask(key),
+        "openaiCompatBaseUrl": cfg.get("openaiCompatBaseUrl") or "",
+        # What is used when the field is empty (NVIDIA NIM when the key is NVIDIA_API_KEY)
+        "openaiCompatEffectiveBaseUrl": gemini.openai_compat_base_url,
+        "openaiCompatModel": cfg.get("openaiCompatModel") or "",
+        "hasOpenaiCompatKey": bool(gemini.openai_compat_api_key),
+        "maskedOpenaiCompatKey": _mask(gemini.openai_compat_api_key),
+        # "config", "OPENAI_COMPAT_API_KEY", "NVIDIA_API_KEY" or None
+        "openaiCompatKeySource": gemini.openai_compat_key_source,
         **{k: cfg.get(k, DEFAULT_CONFIG.get(k)) for k in (
             "model", "persona", "mnemonicTone", "jlptLevel", "kanjiDeckName", "kanjiStrategy",
             "mnemonicStyle", "targetMiningDeck", "leechSearchQuery", "grammarDeckBase",
@@ -797,6 +862,17 @@ async def update_config(req: ConfigUpdateRequest):
         updates["apiKey"] = req.apiKey.strip()
     if getattr(req, "model", None) is not None:
         updates["model"] = req.model
+    if req.openaiCompatBaseUrl is not None:
+        base_url = req.openaiCompatBaseUrl.strip().rstrip("/")
+        if base_url and not re.match(r"https?://[^\s/]+", base_url):
+            raise HTTPException(status_code=400, detail="The fallback provider URL must start with http:// or https://")
+        updates["openaiCompatBaseUrl"] = base_url
+    if req.openaiCompatModel is not None:
+        updates["openaiCompatModel"] = req.openaiCompatModel.strip()
+    if req.clearOpenaiCompatApiKey:
+        updates["openaiCompatApiKey"] = ""
+    elif req.openaiCompatApiKey is not None and req.openaiCompatApiKey.strip():
+        updates["openaiCompatApiKey"] = req.openaiCompatApiKey.strip()
     if getattr(req, "persona", None) is not None:
         updates["persona"] = req.persona
     if getattr(req, "mnemonicTone", None) is not None:

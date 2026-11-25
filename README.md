@@ -122,6 +122,8 @@ flowchart TD
         GeminiAPI["Google Gemini API (Flash)"]
     end
 
+    FallbackAPI["Optional fallback provider<br/>(NVIDIA NIM, OpenRouter or local Ollama)"]
+
     subgraph Frontend["🌐 Web Studio (:8766)"]
         UI["Glassmorphism Web UI (HTML/CSS/JS)"]
         CollisionRadar["⚡ Collision & Confusion Radar"]
@@ -137,6 +139,7 @@ flowchart TD
     RAG <--> IDSEngine
     IDSEngine <--> IDSDataset
     GeminiClient <--> GeminiAPI
+    GeminiClient -. "every Gemini model busy" .-> FallbackAPI
     GeminiClient <--> CallLog
     App <--> UI
     UI <--> CollisionRadar
@@ -202,6 +205,7 @@ Roles without a matching field are skipped. The note type must have a field for 
 1. **Anki Desktop**: Running locally with the [AnkiConnect](https://ankiweb.net/shared/info/2055492153) add-on installed (Code: `2055492153`). No AnkiConnect CORS changes are needed: only the local server talks to Anki.
 2. **Python 3.12 or newer** (tested on 3.12–3.15). Use the latest patch release of your version, since that's where security fixes land.
 3. **Gemini API Key**: Get a free API key from [Google AI Studio](https://aistudio.google.com/app/apikey). The free tier has low daily limits per model; when the configured model is out of quota the app falls back to other Flash models automatically.
+4. **Optional, a fallback provider** for evenings when every Gemini model is busy or out of quota: see [Fallback provider](#-fallback-provider-nvidia-nim-openrouter-or-ollama).
 
 ### 1. Clone & Install
 ```bash
@@ -213,7 +217,7 @@ pip install -r requirements.txt
 ```
 
 ### 2. Configure Settings
-Copy the template configuration file and add your Gemini API key (or set the `GEMINI_API_KEY` environment variable):
+Copy the template configuration file and add your Gemini API key (or put `GEMINI_API_KEY=...` in a `.env` file, see `.env.example`):
 ```bash
 cp config.example.json config.json
 ```
@@ -271,8 +275,26 @@ All settings are stored locally in `config.json` (git-ignored). Only the keys yo
 | `ragDecks` | `string[]` | Decks indexed by the Collision Radar (pick them in Settings). |
 | `ragExcludeSuspended` | `bool` | Skip suspended cards when indexing. |
 | `persona` | `string` | Your background and interests, used to personalise stories. |
+| `openaiCompatBaseUrl` | `string` | Optional. Base URL of an OpenAI-compatible chat API asked when every Gemini model has failed, e.g. `https://integrate.api.nvidia.com/v1`. Empty = off. |
+| `openaiCompatModel` | `string` | Optional. That provider's model ID, e.g. `minimaxai/minimax-m3.1-flash`. Empty = off. |
+| `openaiCompatApiKey` | `string` | Optional. Sent as `Authorization: Bearer <key>`; not needed for a local server. Shown masked in Settings and never logged. |
+
+### 🛟 Fallback provider (NVIDIA NIM, OpenRouter or Ollama)
+
+On busy evenings every Gemini model can be out of quota or overloaded at the same time. You can add one OpenAI-compatible chat API as a last resort: it is asked only after every Gemini model has failed or been skipped, and every feature (mining, mnemonics, sentences, the Sensei chat) then works as usual. Set it in **Settings → AI Credentials & Model → Fallback provider**, or in `config.json`. Once the URL (and key, for a remote provider) is set, the **Model** dropdown lists the provider's chat models (*↻ Load models* fetches them again), with how each has done as your fallback this week; *Other model ID…* takes any ID the list doesn't have (`POST /api/fallback-provider/models`). The key can also go in `.env` (see [Environment variables](#environment-variables)): with `NVIDIA_API_KEY=nvapi-...` there, only the model is left to pick in Settings.
+
+| Provider | `openaiCompatBaseUrl` | `openaiCompatModel` (example) | Key |
+| :--- | :--- | :--- | :--- |
+| [NVIDIA NIM](https://build.nvidia.com/) | `https://integrate.api.nvidia.com/v1` | `minimaxai/minimax-m3.1-flash` | Free `nvapi-...` key from build.nvidia.com (rate limited to about 40 requests a minute). |
+| [OpenRouter](https://openrouter.ai/) | `https://openrouter.ai/api/v1` | any model ID ending in `:free` | `sk-or-...` key from openrouter.ai/keys. Free models have a small daily request limit. |
+| [Ollama](https://ollama.com/) (local) | `http://localhost:11434/v1` | `qwen2.5:14b` | None. Run `ollama pull qwen2.5:14b` first; a 14B model fits in 16–18 GB of RAM. |
+| [LM Studio](https://lmstudio.ai/) (local) | `http://localhost:1234/v1` | the model ID LM Studio shows | None. Start its local server first. |
+
+Remote providers get 60s to answer and a server on `localhost` gets 5 minutes, since a local 14B model on a laptop is slow. The provider gets the same cooldowns as a Gemini model: after an overload (5xx), a timeout or a 429 without `Retry-After` it is skipped for 1 to 10 minutes unless nothing else is left; after a 429 with `Retry-After` it is not asked until that time. Its calls are logged as `openai:<model>`, so it shows in **Gemini Usage Today**, the performance dashboard and the fallback order. Pick a model that handles Japanese well: smaller local models are more likely to get furigana wrong. NVIDIA's free catalog changes, which is why the dropdown asks NVIDIA for it. In a test in November 2026, `minimaxai/minimax-m3.1-flash` and `nvidia/nemotron-3-ultra-550b-a55b` produced valid furigana sentences in 15–40s; larger "pro" models often ran past the 60s timeout. With Ollama, give long prompts room by starting it with `OLLAMA_CONTEXT_LENGTH=8192 ollama serve`.
 
 ### Environment variables
+
+The app also reads a `.env` file next to `app.py` (git-ignored; start from `cp .env.example .env`). Variables already set in your shell win over `.env`, and keys saved in Settings win over both. Keys are never written to logs or error messages.
 
 | Variable | Default | Purpose |
 | :--- | :--- | :--- |
@@ -280,6 +302,10 @@ All settings are stored locally in `config.json` (git-ignored). Only the keys yo
 | `LEECH_DOCTOR_CONFIG` | `./config.json` | Config file path. |
 | `LEECH_DOCTOR_RAG_DIR` | `./.rag_storage` | Collision Radar index location. |
 | `LEECH_DOCTOR_DB` | `./leech_doctor.db` | SQLite database: Gemini call log, cooldowns, learned quotas. |
+| `GEMINI_API_KEY` / `GOOGLE_API_KEY` | – | Gemini API key, used when `apiKey` isn't set in Settings. |
+| `OPENAI_COMPAT_API_KEY` | – | [Fallback provider](#-fallback-provider-nvidia-nim-openrouter-or-ollama) key, used when `openaiCompatApiKey` isn't set in Settings. |
+| `NVIDIA_API_KEY` | – | NVIDIA NIM key, used when neither of the above is set. With only this key, `openaiCompatBaseUrl` defaults to `https://integrate.api.nvidia.com/v1`, so you just pick a model in Settings. |
+| `LEECH_DOCTOR_DOTENV` | `1` | Set to `0` to ignore the `.env` file. |
 | `LEECH_DOCTOR_ALLOWED_HOSTS` | `127.0.0.1,localhost` | Host names the server answers to. Add your machine's LAN name/IP if you open the app from another device (and start uvicorn with `--host 0.0.0.0`). |
 
 ---
@@ -291,6 +317,7 @@ All settings are stored locally in `config.json` (git-ignored). Only the keys yo
 - **"All Review Cards" is empty or shows the wrong cards**: check **"All Review Cards" Scope** in Settings. Leave it empty to use your whole collection.
 - **Slow or timed-out Gemini calls, or "high demand" (HTTP 503)**: Google's popular Flash models are often overloaded. The app waits at most 25s per model, then falls back to the models that have answered quickest over the last week, and skips a model that just failed for 1 to 10 minutes. If it keeps happening, check **Settings → Debug: Gemini Models & Fallback Order** and pick the model at the top as yours.
 - **Gemini errors mentioning quota (HTTP 429)**: that model's free-tier limit is used up. The app stops asking it until the time Google says the quota resets (midnight Pacific for daily limits) and uses the fallback models meanwhile. It remembers this across restarts in `leech_doctor.db`. To try again sooner, e.g. after upgrading your plan, delete the cooldowns: `sqlite3 leech_doctor.db 'DELETE FROM model_cooldowns'`.
+- **"All available Gemini models are busy" every evening**: add a [fallback provider](#-fallback-provider-nvidia-nim-openrouter-or-ollama). If it is set but never answers, the error message lists its reason under `[openai:<model>]`; for a local server, check it is running (`curl http://localhost:11434/v1/models`).
 - **"Invalid host header"**: you opened the app under a host name that isn't allowed. Use `http://127.0.0.1:8766` or set `LEECH_DOCTOR_ALLOWED_HOSTS`.
 
 ---

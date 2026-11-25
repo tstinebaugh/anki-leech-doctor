@@ -586,6 +586,30 @@
               <option value="gemini-3.5-flash">Gemini 3.5 Flash</option>
             </select>
           </div>
+
+          <details class="form-group" id="openai-compat-settings">
+            <summary><strong>Fallback provider (optional)</strong> &mdash; used only when every Gemini model is busy or out of quota</summary>
+            <small class="form-help" style="display:block; margin: 6px 0 10px;">Any OpenAI-compatible chat API: NVIDIA NIM (<code>https://integrate.api.nvidia.com/v1</code>), OpenRouter (<code>https://openrouter.ai/api/v1</code>) or a local Ollama (<code>http://localhost:11434/v1</code>) / LM Studio (<code>http://localhost:1234/v1</code>). Leave the URL or model empty to turn it off.</small>
+            <div class="form-group">
+              <label for="setting-openai-base-url">Base URL</label>
+              <input type="url" id="setting-openai-base-url" class="input-text" placeholder="https://integrate.api.nvidia.com/v1" autocomplete="off">
+            </div>
+            <div class="form-group">
+              <label for="setting-openai-api-key">API Key</label>
+              <input type="password" id="setting-openai-api-key" class="input-text" placeholder="nvapi-... (not needed for Ollama)" autocomplete="off">
+              <small class="form-help">Sent as a Bearer token and saved locally in <code>config.json</code>. Or leave it empty and set <code>OPENAI_COMPAT_API_KEY</code> or <code>NVIDIA_API_KEY</code> in your environment or <code>.env</code>.
+                <label style="display:inline; font-weight:normal;"><input type="checkbox" id="setting-openai-clear-key"> Remove the saved key</label></small>
+            </div>
+            <div class="form-group">
+              <label for="setting-openai-model-select">Model</label>
+              <div class="provider-model-picker">
+                <select id="setting-openai-model-select" class="select-dropdown" hidden></select>
+                <button type="button" id="btn-openai-load-models" class="btn-ghost-sm" title="Ask the provider which models it offers">↻ Load models</button>
+              </div>
+              <input type="text" id="setting-openai-model" class="input-text" aria-label="Model ID" placeholder="e.g. minimaxai/minimax-m3.1-flash or qwen2.5:14b" autocomplete="off">
+              <small class="form-help" id="openai-models-status" aria-live="polite">Load the provider's models to pick one, or type a model ID.</small>
+            </div>
+          </details>
         </div>
 
         <!-- SECTION 1b: GEMINI USAGE (from the SQLite call log) -->

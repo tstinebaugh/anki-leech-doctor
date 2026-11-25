@@ -1,9 +1,13 @@
 import os
 import json
+import math
 import re
 import time
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 import httpx
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -47,6 +51,22 @@ COOLDOWN_MAX = 600.0
 COOLDOWN_NOT_FOUND = 3600.0
 COOLDOWN_QUOTA_MAX = 26 * 3600.0  # a daily quota resets within a day; ignore anything longer
 QUOTA_RESET_TZ = "America/Los_Angeles"  # Gemini's daily quotas reset at midnight Pacific
+
+# ---- OpenAI-compatible fallback provider ----------------------------------------------------
+# When every Gemini model is out of quota, overloaded or timed out, one OpenAI-compatible
+# chat-completions server is asked last: NVIDIA NIM (build.nvidia.com), OpenRouter, or a local
+# Ollama / LM Studio. Config keys openaiCompatBaseUrl and openaiCompatModel turn it on;
+# openaiCompatApiKey is sent as a Bearer token. It is logged as "openai:<model>".
+# The key can also come from the environment (or .env, see config_defaults.py): first
+# OPENAI_COMPAT_API_KEY, then NVIDIA_API_KEY. With only NVIDIA_API_KEY set, the base URL
+# defaults to NVIDIA NIM, so an NVIDIA key and a model are all it takes.
+NVIDIA_NIM_BASE_URL = "https://integrate.api.nvidia.com/v1"
+OPENAI_COMPAT_KEY_ENV_VARS = ("OPENAI_COMPAT_API_KEY", "NVIDIA_API_KEY")
+OPENAI_COMPAT_TIMEOUT = 60.0         # remote providers answer in seconds when healthy
+OPENAI_COMPAT_LOCAL_TIMEOUT = 300.0  # a local 14B model on a laptop may take minutes
+OPENAI_COMPAT_MAX_TOKENS = 4096
+OPENAI_COMPAT_BUSY_RETRY_MAX = 60.0  # a 429 Retry-After up to this long counts as "busy", not "out of quota"
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
 
 
 class GeminiBusyError(RuntimeError):
@@ -302,6 +322,123 @@ def _parse_error(resp: httpx.Response) -> Tuple[str, Optional[float], bool, Opti
     return message, retry_after, daily, limit, quota_model
 
 
+def is_local_url(url: str) -> bool:
+    """True for a server on this machine (Ollama, LM Studio), which gets a longer timeout."""
+    host = (urlparse(url).hostname or "").lower()
+    return host in _LOCAL_HOSTS or host.endswith(".localhost")
+
+
+def to_openai_messages(contents: List[Dict[str, Any]], system_instruction: Optional[str]) -> List[Dict[str, str]]:
+    """Gemini `contents` (+ system instruction) as OpenAI chat `messages`.
+
+    Gemini's "model" role is OpenAI's "assistant"; a turn's text parts are joined, and
+    thought parts (Gemini's own reasoning) are left out."""
+    messages: List[Dict[str, str]] = []
+    if system_instruction:
+        messages.append({"role": "system", "content": system_instruction})
+    for turn in contents:
+        role = "assistant" if turn.get("role") == "model" else "user"
+        text = "".join(p.get("text", "") for p in turn.get("parts", []) if p.get("text") and not p.get("thought"))
+        messages.append({"role": role, "content": text})
+    return messages
+
+
+def _openai_text(data: Dict[str, Any]) -> Tuple[str, str]:
+    """(text, problem) from a chat-completions reply. Reasoning models served by Ollama
+    (qwen3, deepseek-r1) put their thinking in <think>...</think>, which callers must not see."""
+    choices = data.get("choices") or []
+    if not choices:
+        return "", "No choices returned in response"
+    message = choices[0].get("message") or {}
+    content = message.get("content") or ""
+    if isinstance(content, list):  # some servers return content parts
+        content = "".join(p.get("text", "") for p in content if isinstance(p, dict))
+    text = re.sub(r"<think>.*?(?:</think>|$)", "", str(content), flags=re.DOTALL).strip()
+    if text:
+        return text, ""
+    if choices[0].get("finish_reason") == "length":
+        return "", "Reply was cut off at the output token limit"
+    return "", "Empty reply"
+
+
+def _openai_usage(data: Dict[str, Any]) -> Dict[str, Optional[int]]:
+    usage = data.get("usage") or {}
+    return {
+        "prompt_tokens": usage.get("prompt_tokens"),
+        "output_tokens": usage.get("completion_tokens"),
+        "thought_tokens": (usage.get("completion_tokens_details") or {}).get("reasoning_tokens"),
+    }
+
+
+def _retry_after_header(resp: httpx.Response) -> Optional[float]:
+    """Seconds from a Retry-After header (delta-seconds or an HTTP date), if present."""
+    value = (resp.headers.get("retry-after") or "").strip()
+    if not value:
+        return None
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        pass
+    try:
+        return max(0.0, parsedate_to_datetime(value).timestamp() - time.time())
+    except (TypeError, ValueError):
+        return None
+
+
+def _openai_error(resp: httpx.Response) -> str:
+    try:
+        body = resp.json()
+    except Exception:
+        return (resp.text or "")[:500]
+    err = body.get("error") if isinstance(body, dict) else None
+    if isinstance(err, dict):
+        return str(err.get("message") or err)[:500]
+    if err:
+        return str(err)[:500]
+    return str(body.get("detail") or body.get("message") or body)[:500] if isinstance(body, dict) else str(body)[:500]
+
+
+# Models a provider lists that can't answer a chat prompt (NVIDIA lists embedders,
+# guardrails, speech and vision tools next to the chat models)
+_NON_CHAT_MODEL = re.compile(
+    r"embed|rerank|retriev|guard|safety|content-safety|clip|detector|pii|calibration|riva|whisper|tts|"
+    r"parakeet|canary|asr|ocr|parse|reward|cosmos|starcoder|deplot|kosmos|paligemma",
+    re.IGNORECASE,
+)
+
+
+async def list_openai_compat_models(base_url: str, api_key: str = "") -> List[str]:
+    """Chat model IDs that GET {base}/models lists, sorted. Raises RuntimeError with a
+    message that never contains the key."""
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=CONNECT_TIMEOUT)) as client:
+            resp = await client.get(f"{base_url}/models", headers=headers)
+    except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+        raise RuntimeError(f"Can't reach {base_url} ({type(e).__name__}). Is the server running?") from e
+    except httpx.TimeoutException as e:
+        raise RuntimeError(f"{base_url} didn't list its models within 15s") from e
+    if resp.status_code != 200:
+        hint = " (check the API key)" if resp.status_code in (401, 403) else ""
+        raise RuntimeError(f"{base_url}/models answered HTTP {resp.status_code}: {_openai_error(resp)[:200]}{hint}")
+    try:
+        data = resp.json()
+    except Exception as e:
+        raise RuntimeError(f"{base_url}/models didn't return JSON; is this an OpenAI-compatible API?") from e
+    entries = data.get("data") if isinstance(data, dict) else data
+    ids = {str(m.get("id")) for m in entries or [] if isinstance(m, dict) and m.get("id")}
+    return sorted(i for i in ids if not _NON_CHAT_MODEL.search(i))
+
+
+@dataclass
+class ProviderResult:
+    """What the OpenAI-compatible fallback did: answered (`text`) or why it didn't."""
+    text: str = ""
+    tried: bool = False
+    busy: bool = False                 # failed in a way that may pass in a few seconds
+    retry_after: Optional[float] = None
+
+
 KANJI_CHARS = r"\u4e00-\u9faf々〆ヶ"
 
 def _strip_json_fences(raw: str) -> str:
@@ -550,6 +687,13 @@ def performance_report(range_name: str = "week") -> Dict[str, Any]:
     }
 
 
+def _busy_retry_after(provider_retry_after: Optional[float]) -> int:
+    """Seconds the frontend should wait before retrying, honouring a short provider Retry-After."""
+    if provider_retry_after is None:
+        return BUSY_RETRY_AFTER
+    return max(BUSY_RETRY_AFTER, math.ceil(min(provider_retry_after, OPENAI_COMPAT_BUSY_RETRY_MAX)))
+
+
 class GeminiClient:
     def __init__(self, config_path: str = DEFAULT_CONFIG_PATH):
         self.config_path = config_path
@@ -591,7 +735,43 @@ class GeminiClient:
     @property
     def fallback_models(self) -> List[str]:
         configured = self.config.get("fallbackModels")
-        return list(configured) if isinstance(configured, list) and configured else list(FALLBACK_MODELS)
+        models = list(configured) if isinstance(configured, list) and configured else list(FALLBACK_MODELS)
+        # The OpenAI-compatible provider is configured on its own, never as a Gemini fallback
+        return [m for m in models if not model_catalog.is_provider(str(m))] or list(FALLBACK_MODELS)
+
+    @property
+    def openai_compat_key_source(self) -> Optional[str]:
+        """Where the provider key comes from: "config", an env var name, or None."""
+        if str(self.config.get("openaiCompatApiKey") or "").strip():
+            return "config"
+        return next((var for var in OPENAI_COMPAT_KEY_ENV_VARS if os.environ.get(var, "").strip()), None)
+
+    @property
+    def openai_compat_api_key(self) -> str:
+        source = self.openai_compat_key_source
+        if source is None:
+            return ""
+        value = self.config.get("openaiCompatApiKey") if source == "config" else os.environ.get(source)
+        return str(value or "").strip()
+
+    @property
+    def openai_compat_base_url(self) -> str:
+        configured = str(self.config.get("openaiCompatBaseUrl") or "").strip().rstrip("/")
+        if configured:
+            return configured
+        # Only when the key is NVIDIA's: never send another provider's key to NVIDIA
+        return NVIDIA_NIM_BASE_URL if self.openai_compat_key_source == "NVIDIA_API_KEY" else ""
+
+    @property
+    def openai_compat_model(self) -> str:
+        return str(self.config.get("openaiCompatModel") or "").strip()
+
+    @property
+    def openai_compat_name(self) -> Optional[str]:
+        """Call-log and cooldown name of the fallback provider, or None when it is off."""
+        if not self.openai_compat_base_url or not self.openai_compat_model:
+            return None
+        return f"{model_catalog.PROVIDER_PREFIX}{self.openai_compat_model}"[:100]
 
     def candidate_models(self) -> List[str]:
         """The configured model, then the fallbacks in the order to try them."""
@@ -702,6 +882,15 @@ class GeminiClient:
             for m in blocked
         }
         if not models_to_try:
+            provider = await self._call_openai_compat(contents, system_instruction, task, errors_by_model)
+            if provider.text:
+                return provider.text
+            if provider.busy:
+                raise GeminiBusyError(
+                    "All Gemini models are out of quota and the fallback provider is busy: "
+                    + "; ".join(f"[{m}] {e}" for m, e in errors_by_model.items()),
+                    retry_after=_busy_retry_after(provider.retry_after),
+                )
             soonest = min(blocked, key=model_health.available_at)
             logger.warning("No Gemini model available: " + "; ".join(f"[{m}] {e}" for m, e in errors_by_model.items()))
             raise GeminiQuotaError(
@@ -744,10 +933,16 @@ class GeminiClient:
                             headers=self._auth_headers(),
                         )
             except (httpx.ConnectError, httpx.ConnectTimeout) as e:
-                # Every model lives on the same host, so trying the others won't help
+                # Every model lives on the same host, so trying the others won't help;
+                # the fallback provider may still answer (a local Ollama works offline)
                 log("offline", error=str(e))
+                errors_by_model[model_name] = f"Can't reach the Gemini API ({type(e).__name__})"
+                provider = await self._call_openai_compat(contents, system_instruction, task, errors_by_model)
+                if provider.text:
+                    return provider.text
+                also = f" The fallback provider failed too: {errors_by_model[self.openai_compat_name]}" if provider.tried else ""
                 raise RuntimeError(
-                    f"Can't reach the Gemini API ({type(e).__name__}). Check your internet connection and try again."
+                    f"Can't reach the Gemini API ({type(e).__name__}). Check your internet connection and try again.{also}"
                 ) from e
             except httpx.TimeoutException:
                 err_msg = f"Request timed out on {model_name} after {attempt_timeout.read:.0f}s"
@@ -807,6 +1002,11 @@ class GeminiClient:
             else:
                 logger.warning(f"Gemini call to {model_name} failed: {err_msg}")
 
+        provider = await self._call_openai_compat(contents, system_instruction, task, errors_by_model)
+        if provider.text:
+            return provider.text
+        busy = busy or provider.busy
+
         primary_err = errors_by_model.get(self.model, "Unknown error")
         details = [f"[{m}] {err}" for m, err in errors_by_model.items()]
         message = (
@@ -814,8 +1014,104 @@ class GeminiClient:
             f"All attempted models failed: {'; '.join(details)}"
         )
         if busy:
-            raise GeminiBusyError(message)
+            raise GeminiBusyError(message, retry_after=_busy_retry_after(provider.retry_after if provider.busy else None))
         raise RuntimeError(message)
+
+    async def _call_openai_compat(
+        self, contents: List[Dict[str, Any]], system_instruction: Optional[str], task: str,
+        errors_by_model: Dict[str, str],
+    ) -> ProviderResult:
+        """Asks the OpenAI-compatible fallback provider, if one is configured and not blocked.
+
+        Never raises: a failure is added to `errors_by_model` and the cooldowns, like a Gemini
+        model's, so the caller can report every model's error together."""
+        name = self.openai_compat_name
+        if name is None:
+            return ProviderResult()
+        if model_health.is_blocked(name):
+            errors_by_model[name] = (
+                f"skipped, {model_health.reason(name) or 'unavailable'} {describe_until(model_health.available_at(name))}"
+            )
+            return ProviderResult()
+
+        base = self.openai_compat_base_url
+        local = is_local_url(base)
+        read_timeout = OPENAI_COMPAT_LOCAL_TIMEOUT if local else OPENAI_COMPAT_TIMEOUT
+        headers = {"Content-Type": "application/json"}
+        if self.openai_compat_api_key:
+            headers["Authorization"] = f"Bearer {self.openai_compat_api_key}"
+        payload = {
+            "model": self.openai_compat_model,
+            "messages": to_openai_messages(contents, system_instruction),
+            "temperature": 0.7,
+            "max_tokens": OPENAI_COMPAT_MAX_TOKENS,
+        }
+        logger.info(f"Every Gemini model failed; asking the fallback provider {name} at {base}")
+        started_at, t0 = datetime.now(timezone.utc), time.monotonic()
+
+        def log(outcome: str, **fields: Any) -> None:
+            _log_call(name, task, outcome, started_at, t0, **fields)
+
+        def failed(message: str, busy: bool, retry_after: Optional[float] = None) -> ProviderResult:
+            errors_by_model[name] = message
+            if model_health.cooldown_left(name):
+                logger.warning(f"Fallback provider {name} failed: {message}; skipping it {describe_until(model_health.available_at(name))}")
+            else:
+                logger.warning(f"Fallback provider {name} failed: {message}")
+            return ProviderResult(tried=True, busy=busy, retry_after=retry_after)
+
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(read_timeout, connect=CONNECT_TIMEOUT)) as client:
+                resp = await client.post(f"{base}/chat/completions", json=payload, headers=headers)
+        except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+            # Nobody listening (a local server not started) or offline: not worth a quick retry
+            message = f"Can't reach {base} ({type(e).__name__})"
+            model_health.failed(name, reason="unreachable")
+            log("offline", error=message)
+            return failed(message, busy=False)
+        except httpx.TimeoutException:
+            message = f"Request timed out after {read_timeout:.0f}s"
+            model_health.failed(name, reason="timed out")
+            log("timeout", error=message)
+            return failed(message, busy=True)
+        except Exception as e:
+            message = f"Error calling {base}: {type(e).__name__}: {e}"
+            log("error", error=message)
+            return failed(message, busy=True)
+
+        if resp.status_code == 200:
+            try:
+                data = resp.json()
+            except Exception:
+                data = {}
+            text, problem = _openai_text(data if isinstance(data, dict) else {})
+            served = str(data.get("model") or "")[:100] if isinstance(data, dict) else ""
+            log("ok" if text else "empty", http_status=200, error=problem or None,
+                model_version=served if served and served != self.openai_compat_model else None,
+                **_openai_usage(data if isinstance(data, dict) else {}))
+            if text:
+                model_health.succeeded(name)
+                logger.info(f"Fallback provider {name} answered because every Gemini model was unavailable.")
+                return ProviderResult(text=text, tried=True)
+            return failed(problem, busy=False)
+
+        detail = _openai_error(resp)
+        message = f"HTTP {resp.status_code}: {detail}"
+        log(_outcome_for(resp.status_code, False), http_status=resp.status_code, error=detail)
+        if resp.status_code == 429:
+            retry_after = _retry_after_header(resp)
+            model_health.failed(name, retry_after=retry_after, hard=retry_after is not None, reason="rate limited")
+            busy = retry_after is None or retry_after <= OPENAI_COMPAT_BUSY_RETRY_MAX
+            return failed(message, busy=busy, retry_after=retry_after)
+        if resp.status_code == 404:
+            model_health.failed(name, hard=True, reason="model not found")
+            return failed(message, busy=False)
+        if resp.status_code >= 500:
+            model_health.failed(name, reason=f"overloaded (HTTP {resp.status_code})")
+            return failed(message, busy=True)
+        if resp.status_code in (401, 403):
+            message = f"{message} (check openaiCompatApiKey in Settings)"
+        return failed(message, busy=False)
 
     @staticmethod
     def _build_payload(

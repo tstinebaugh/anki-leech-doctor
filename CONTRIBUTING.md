@@ -44,6 +44,8 @@ pytest -m integration     # optional: needs Anki running and a real Gemini key; 
 ```
 Unit tests run against a temporary config and database (see `conftest.py`), so they never modify your `config.json` or `leech_doctor.db`. CI runs `ruff check .` and `pytest` on every pull request.
 
+Unit tests never touch the network: Gemini and the OpenAI-compatible fallback provider are tested by patching `httpx.AsyncClient.post` (see `test_gemini_reliability.py` and `test_openai_compat_fallback.py`). API keys go in request headers only; never put one in a URL, a log line or an error message.
+
 ### 5. Database migrations
 
 `leech_doctor.db` is SQLite, mapped with SQLAlchemy 2.0 in [`db.py`](db.py); [Alembic](https://alembic.sqlalchemy.org/) owns the schema in [`migrations/`](migrations/). The app runs `alembic upgrade head` itself on startup. To change the schema:

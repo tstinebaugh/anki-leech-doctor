@@ -7,6 +7,26 @@ import os
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
+
+def load_dotenv_file() -> None:
+    """Loads KEY=value lines from .env in the app directory (git-ignored), if there is one.
+
+    Variables already set in the environment win. LEECH_DOCTOR_DOTENV=0 turns this off
+    (the tests do, so your real keys never reach them)."""
+    if os.environ.get("LEECH_DOCTOR_DOTENV", "1") == "0":
+        return
+    path = os.path.join(APP_DIR, ".env")
+    if not os.path.isfile(path):
+        return
+    try:
+        from dotenv import load_dotenv
+    except ImportError:  # python-dotenv comes with requirements.txt; without it .env is ignored
+        return
+    load_dotenv(path, override=False)
+
+
+load_dotenv_file()
+
 # Paths (overridable with env vars, e.g. for tests or running several profiles)
 CONFIG_PATH = os.environ.get("LEECH_DOCTOR_CONFIG", os.path.join(APP_DIR, "config.json"))
 RAG_STORAGE_PATH = os.environ.get("LEECH_DOCTOR_RAG_DIR", os.path.join(APP_DIR, ".rag_storage"))
