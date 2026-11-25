@@ -487,3 +487,69 @@ def test_dotenv_file_is_loaded_without_overriding_the_environment(tmp_path, no_e
     config_defaults.load_dotenv_file()
     assert gemini_client.os.environ["NVIDIA_API_KEY"] == ENV_KEY
     assert gemini_client.os.environ["OPENAI_COMPAT_API_KEY"] == "from-the-shell"
+
+
+# ---- model list for the Settings dropdown ---------------------------------------------------
+
+def _models_resp(ids, status=200):
+    return _resp(status, {"object": "list", "data": [{"id": i, "object": "model"} for i in ids]})
+
+
+NIM_LIST = ["minimaxai/minimax-m3.1-flash", "nvidia/nemotron-3.5-embed-1b", "nvidia/llama-3.1-nemoguard-8b-topic-control",
+            "z-ai/glm-5.3-flash", "snowflake/arctic-embed-l", "nvidia/nemotron-3-ultra-550b-a55b", "nvidia/nvclip"]
+
+
+def test_model_list_keeps_chat_models_and_marks_this_weeks_results(api, no_env_keys):
+    client, app_module = api
+    no_env_keys.setenv("NVIDIA_API_KEY", ENV_KEY)
+    app_module.gemini.save_config({"openaiCompatModel": "minimaxai/minimax-m3.1-flash"})
+    for outcome in ("ok", "ok", "timeout"):
+        model_health.db.record_call(model="openai:minimaxai/minimax-m3.1-flash", task="sentence", outcome=outcome,
+                                    http_status=200 if outcome == "ok" else None, latency_ms=26000)
+    with patch("httpx.AsyncClient.get") as mock_get:
+        mock_get.return_value = _models_resp(NIM_LIST)
+        res = client.post("/api/fallback-provider/models", json={})
+    assert res.status_code == 200
+    data = res.json()
+    assert data["baseUrl"] == NIM and data["selected"] == "minimaxai/minimax-m3.1-flash"
+    assert [m["id"] for m in data["models"]] == [
+        "minimaxai/minimax-m3.1-flash", "nvidia/nemotron-3-ultra-550b-a55b", "z-ai/glm-5.3-flash",
+    ]
+    assert data["models"][0]["calls"] == 3 and data["models"][0]["ok"] == 2
+    assert data["models"][1]["calls"] == 0
+    call = mock_get.call_args
+    assert call.args[0] == f"{NIM}/models" and call.kwargs["headers"]["Authorization"] == f"Bearer {ENV_KEY}"
+    assert ENV_KEY not in res.text
+
+
+def test_saved_key_is_not_sent_to_a_different_url(api, no_env_keys):
+    client, _ = api
+    no_env_keys.setenv("NVIDIA_API_KEY", ENV_KEY)
+    with patch("httpx.AsyncClient.get") as mock_get:
+        mock_get.return_value = _models_resp(["qwen2.5:14b"])
+        res = client.post("/api/fallback-provider/models", json={"baseUrl": "http://localhost:11434/v1"})
+        assert res.json()["models"][0]["id"] == "qwen2.5:14b"
+        assert "Authorization" not in mock_get.call_args.kwargs["headers"]
+
+        # A key typed in the form (not saved yet) goes with the typed URL
+        client.post("/api/fallback-provider/models", json={"baseUrl": "https://openrouter.ai/api/v1/", "apiKey": "sk-or-typed"})
+        assert mock_get.call_args.args[0] == "https://openrouter.ai/api/v1/models"
+        assert mock_get.call_args.kwargs["headers"]["Authorization"] == "Bearer sk-or-typed"
+
+
+def test_model_list_errors_are_readable_and_keyless(api, no_env_keys):
+    client, _ = api
+    no_env_keys.setenv("NVIDIA_API_KEY", ENV_KEY)
+    with patch("httpx.AsyncClient.get") as mock_get:
+        mock_get.return_value = _resp(401, {"error": {"message": "Unauthorized"}})
+        res = client.post("/api/fallback-provider/models", json={})
+        assert res.status_code == 502 and "check the API key" in res.json()["detail"]
+
+        mock_get.side_effect = httpx.ConnectError("refused")
+        res = client.post("/api/fallback-provider/models", json={"baseUrl": "http://localhost:11434/v1"})
+        assert res.status_code == 502 and "Is the server running?" in res.json()["detail"]
+    assert ENV_KEY not in res.text
+
+    no_env_keys.delenv("NVIDIA_API_KEY")
+    assert client.post("/api/fallback-provider/models", json={}).status_code == 400
+    assert client.post("/api/fallback-provider/models", json={"baseUrl": "localhost:11434"}).status_code == 400

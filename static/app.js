@@ -243,6 +243,9 @@ const el = {
   settingApiKey: document.getElementById("setting-api-key"),
   settingOpenaiBaseUrl: document.getElementById("setting-openai-base-url"),
   settingOpenaiModel: document.getElementById("setting-openai-model"),
+  settingOpenaiModelSelect: document.getElementById("setting-openai-model-select"),
+  btnOpenaiLoadModels: document.getElementById("btn-openai-load-models"),
+  openaiModelsStatus: document.getElementById("openai-models-status"),
   settingOpenaiApiKey: document.getElementById("setting-openai-api-key"),
   settingOpenaiClearKey: document.getElementById("setting-openai-clear-key"),
   settingModel: document.getElementById("setting-model"),
@@ -967,6 +970,67 @@ async function loadConfig() {
   }
 }
 
+// ---- Fallback provider model dropdown (Settings) -------------------------------------
+// The text input holds the model that gets saved; the dropdown, once the provider's list
+// is loaded, fills it in. "Other" shows the input for a model the list doesn't have.
+const PROVIDER_MODEL_OTHER = "__other__";
+
+function showProviderModelInput(show) {
+  if (el.settingOpenaiModel) el.settingOpenaiModel.hidden = !show;
+}
+
+function syncProviderModelSelect() {
+  const select = el.settingOpenaiModelSelect;
+  if (!select || select.hidden || !el.settingOpenaiModel) return;
+  const current = el.settingOpenaiModel.value.trim();
+  if (current && ![...select.options].some((o) => o.value === current)) {
+    const opt = new Option(`${current} (not in the provider's list)`, current);
+    select.add(opt, select.options[1] || null);
+  }
+  select.value = current;
+  showProviderModelInput(false);
+}
+
+function providerModelLabel(m) {
+  if (!m.calls) return m.id;
+  const median = m.medianMs != null ? `, median ${(m.medianMs / 1000).toFixed(0)}s` : "";
+  return `${m.id}  ·  answered ${m.ok}/${m.calls} this week${median}`;
+}
+
+async function loadProviderModels() {
+  const select = el.settingOpenaiModelSelect;
+  const status = el.openaiModelsStatus;
+  if (!select) return;
+  if (status) status.textContent = "Loading the provider's models…";
+  try {
+    const res = await fetch("/api/fallback-provider/models", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        baseUrl: el.settingOpenaiBaseUrl ? el.settingOpenaiBaseUrl.value.trim() || undefined : undefined,
+        apiKey: el.settingOpenaiApiKey ? el.settingOpenaiApiKey.value.trim() || undefined : undefined,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Could not load the models");
+    select.innerHTML = "";
+    select.add(new Option("Off: no fallback provider", ""));
+    data.models.forEach((m) => select.add(new Option(providerModelLabel(m), m.id)));
+    select.add(new Option("Other model ID…", PROVIDER_MODEL_OTHER));
+    select.hidden = false;
+    syncProviderModelSelect();
+    if (status) {
+      status.textContent = data.models.length
+        ? `${data.models.length} chat models from ${data.baseUrl}. Speed varies; see the README for what worked well.`
+        : `${data.baseUrl} listed no chat models; type a model ID instead.`;
+    }
+  } catch (err) {
+    select.hidden = true;
+    showProviderModelInput(true);
+    if (status) status.textContent = `Couldn't load the model list: ${err.message}. Type a model ID instead.`;
+  }
+}
+
 // API keys are never sent back to the page: the fields stay empty and show the masked key.
 function fillKeySettings(cfg) {
   if (el.settingApiKey) {
@@ -980,6 +1044,7 @@ function fillKeySettings(cfg) {
       : "https://integrate.api.nvidia.com/v1";
   }
   if (el.settingOpenaiModel) el.settingOpenaiModel.value = cfg.openaiCompatModel || "";
+  syncProviderModelSelect();
   const keySource = cfg.openaiCompatKeySource;
   if (el.settingOpenaiApiKey) {
     el.settingOpenaiApiKey.value = "";
@@ -989,7 +1054,12 @@ function fillKeySettings(cfg) {
         ? `From ${keySource}: ${cfg.maskedOpenaiCompatKey}`
         : `Saved: ${cfg.maskedOpenaiCompatKey}`;
   }
-  if (el.settingOpenaiClearKey) el.settingOpenaiClearKey.checked = false;
+  if (el.settingOpenaiClearKey) {
+    el.settingOpenaiClearKey.checked = false;
+    // Only a key saved in config.json can be removed here
+    const clearLabel = el.settingOpenaiClearKey.closest("label");
+    if (clearLabel) clearLabel.hidden = keySource !== "config";
+  }
   const compatSection = document.getElementById("openai-compat-settings");
   if (compatSection && (cfg.openaiCompatEffectiveBaseUrl || keySource)) compatSection.open = true;
 }
@@ -3695,7 +3765,30 @@ function setupEventListeners() {
     if (perf && perf.open) loadGeminiPerformance();
     const models = document.getElementById("gemini-models");
     if (models && models.open) loadGeminiModels();
+    if (state.config && state.config.openaiCompatEffectiveBaseUrl && el.settingOpenaiModelSelect
+        && el.settingOpenaiModelSelect.hidden) {
+      loadProviderModels();
+    }
   });
+  if (el.btnOpenaiLoadModels) el.btnOpenaiLoadModels.addEventListener("click", loadProviderModels);
+  if (el.settingOpenaiBaseUrl) {
+    el.settingOpenaiBaseUrl.addEventListener("change", () => {
+      if (el.settingOpenaiBaseUrl.value.trim()) loadProviderModels();
+    });
+  }
+  if (el.settingOpenaiModelSelect) {
+    el.settingOpenaiModelSelect.addEventListener("change", () => {
+      const value = el.settingOpenaiModelSelect.value;
+      if (value === PROVIDER_MODEL_OTHER) {
+        showProviderModelInput(true);
+        el.settingOpenaiModel.value = "";
+        el.settingOpenaiModel.focus();
+      } else {
+        el.settingOpenaiModel.value = value;
+        showProviderModelInput(false);
+      }
+    });
+  }
   el.btnCloseSettings.addEventListener("click", () => {
     el.settingsModal.classList.add("hidden");
   });

@@ -11,6 +11,7 @@ import logging
 import os
 import re
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
@@ -21,7 +22,10 @@ from pydantic import BaseModel
 from anki_client import AnkiClient, JLPT_LEVELS, grammar_deck_name, normalize_jlpt_level
 from config_defaults import DEFAULT_CONFIG
 import model_catalog
-from gemini_client import GeminiBusyError, GeminiClient, GeminiQuotaError, model_health, performance_report, usage_report
+from gemini_client import (
+    GeminiBusyError, GeminiClient, GeminiQuotaError, list_openai_compat_models, model_health, performance_report,
+    usage_report,
+)
 from rag_engine import MultiVectorRAG
 from utils import format_notes_for_anki
 
@@ -426,6 +430,45 @@ def gemini_fallbacks(req: FallbackToggleRequest):
         raise HTTPException(status_code=400, detail="Keep at least one fallback model.")
     gemini.save_config({"fallbackModels": models})
     return _catalog_report()
+
+
+class ProviderModelsRequest(BaseModel):
+    # Values typed in Settings but not saved yet; empty means the saved (or env) value
+    baseUrl: Optional[str] = None
+    apiKey: Optional[str] = None
+
+
+@app.post("/api/fallback-provider/models")
+async def fallback_provider_models(req: ProviderModelsRequest):
+    """Chat models the OpenAI-compatible fallback provider offers, for the Settings dropdown,
+    with how each has done as the fallback over the last week (from the call log)."""
+    saved_base = gemini.openai_compat_base_url
+    base = (req.baseUrl or "").strip().rstrip("/") or saved_base
+    if not base:
+        raise HTTPException(status_code=400, detail="Set the fallback provider's base URL first.")
+    if not re.match(r"https?://[^\s/]+", base):
+        raise HTTPException(status_code=400, detail="The fallback provider URL must start with http:// or https://")
+    key = (req.apiKey or "").strip()
+    if not key and base == saved_base:
+        key = gemini.openai_compat_api_key  # never send a saved key to a different URL
+    try:
+        models = await list_openai_compat_models(base, key)
+    except RuntimeError as e:
+        logger.warning(f"Could not list the fallback provider's models: {e}")
+        raise HTTPException(status_code=502, detail=str(e))
+    since = datetime.now(timezone.utc) - timedelta(days=7)
+    stats = {st.model: st for st in model_health.db.model_stats(since)} if model_health.db else {}
+
+    def describe(model_id: str) -> Dict[str, Any]:
+        st = stats.get(f"{model_catalog.PROVIDER_PREFIX}{model_id}"[:100])
+        return {
+            "id": model_id,
+            "calls": st.calls if st else 0,
+            "ok": st.ok if st else 0,
+            "medianMs": st.median_ms if st else None,
+        }
+
+    return {"baseUrl": base, "selected": gemini.openai_compat_model, "models": [describe(m) for m in models]}
 
 
 @app.post("/api/generate-mnemonic")

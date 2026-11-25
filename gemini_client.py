@@ -398,6 +398,38 @@ def _openai_error(resp: httpx.Response) -> str:
     return str(body.get("detail") or body.get("message") or body)[:500] if isinstance(body, dict) else str(body)[:500]
 
 
+# Models a provider lists that can't answer a chat prompt (NVIDIA lists embedders,
+# guardrails, speech and vision tools next to the chat models)
+_NON_CHAT_MODEL = re.compile(
+    r"embed|rerank|retriev|guard|safety|content-safety|clip|detector|pii|calibration|riva|whisper|tts|"
+    r"parakeet|canary|asr|ocr|parse|reward|cosmos|starcoder|deplot|kosmos|paligemma",
+    re.IGNORECASE,
+)
+
+
+async def list_openai_compat_models(base_url: str, api_key: str = "") -> List[str]:
+    """Chat model IDs that GET {base}/models lists, sorted. Raises RuntimeError with a
+    message that never contains the key."""
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=CONNECT_TIMEOUT)) as client:
+            resp = await client.get(f"{base_url}/models", headers=headers)
+    except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+        raise RuntimeError(f"Can't reach {base_url} ({type(e).__name__}). Is the server running?") from e
+    except httpx.TimeoutException as e:
+        raise RuntimeError(f"{base_url} didn't list its models within 15s") from e
+    if resp.status_code != 200:
+        hint = " (check the API key)" if resp.status_code in (401, 403) else ""
+        raise RuntimeError(f"{base_url}/models answered HTTP {resp.status_code}: {_openai_error(resp)[:200]}{hint}")
+    try:
+        data = resp.json()
+    except Exception as e:
+        raise RuntimeError(f"{base_url}/models didn't return JSON; is this an OpenAI-compatible API?") from e
+    entries = data.get("data") if isinstance(data, dict) else data
+    ids = {str(m.get("id")) for m in entries or [] if isinstance(m, dict) and m.get("id")}
+    return sorted(i for i in ids if not _NON_CHAT_MODEL.search(i))
+
+
 @dataclass
 class ProviderResult:
     """What the OpenAI-compatible fallback did: answered (`text`) or why it didn't."""

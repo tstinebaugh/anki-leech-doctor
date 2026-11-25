@@ -4110,3 +4110,20 @@ body {
   gap: 0.4rem;
 }
 .model-candidates .model-toggle { margin-left: auto; }
+
+/* Fallback provider model picker (Settings) */
+.provider-model-picker {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.provider-model-picker .select-dropdown {
+  flex: 1;
+  min-width: 0;
+}
+.provider-model-picker + .input-text {
+  margin-top: 8px;
+}
+#openai-compat-settings [hidden] {
+  display: none !important;
+}
